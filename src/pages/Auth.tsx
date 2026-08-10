@@ -138,6 +138,7 @@ export default function Auth() {
   }, []);
 
   useEffect(() => {
+    console.log('[QA-DEBUG] [mode] effect fired, mode =', mode, 'pendingNoticeRef.current =', JSON.stringify(pendingNoticeRef.current));
     setError(null);
     setResetSent(false);
     setFieldErrors({});
@@ -338,13 +339,16 @@ export default function Auth() {
             // mode (the [mode] effect consumes pendingNoticeRef, so the notice
             // survives and shows on the sign-in form — a plain setNotice here
             // would be wiped by the same render batch).
+            console.log('[QA-DEBUG] signup success path: switching mode to signin');
             pendingNoticeRef.current = 'Account created — please sign in below.';
             setMode('signin');
+            console.log('[QA-DEBUG] after setMode — React hasn’t re-rendered yet');
             setPassword('');
             setConfirmPassword('');
             setFullName('');
             setUsername('');
             setUsernameStatus('idle');
+            console.log('[QA-DEBUG] signup success: all setters queued');
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'Something went wrong. Please try again.';
             if (msg.includes('User already registered')) {
