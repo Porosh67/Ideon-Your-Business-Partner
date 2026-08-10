@@ -39,6 +39,78 @@ async function verifyUser(req: Request) {
   return data.user ?? null;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Groq fallback chain — same shape as assistant-chat. The 70b
+// is the smartest llama on the free tier but has a 100k TPD
+// quota; llama-3.1-8b-instant is ~5x more generous and is good
+// enough for follow-up chat replies. On a 429 we transparently
+// escalate to 8b-instant so the user's follow-up question keeps
+// getting answered instead of returning a 500 "Sorry, I couldn't
+// process that". Non-429 errors still surface immediately (they
+// are usually auth or genuine outages — retrying won't help).
+// ─────────────────────────────────────────────────────────────
+const GROQ_MODEL_PRIMARY = 'llama-3.3-70b-versatile';
+const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
+const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
+
+function nextModelAfterQuota(currentModel: string): string | null {
+  const idx = MODEL_CHAIN.indexOf(currentModel as (typeof MODEL_CHAIN)[number]);
+  if (idx < 0 || idx === MODEL_CHAIN.length - 1) return null;
+  return MODEL_CHAIN[idx + 1] ?? null;
+}
+
+function isGroqQuotaError(err: unknown): boolean {
+  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+}
+
+async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<Response> {
+  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Send a pre-built messages array to Groq; escalates to 8b-instant on 429. */
+async function groqChatMessages(apiKey: string, messages: { role: string; content: string }[], maxTokens = 1200, temperature = 0.5) {
+  let lastErr: unknown = null;
+  for (const model of MODEL_CHAIN) {
+    try {
+      const res = await groqCall(apiKey, {
+        model,
+        temperature,
+        max_tokens: maxTokens,
+        messages,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (res.status === 429 && nextModelAfterQuota(model)) {
+          console.warn(
+            `[plan-chat] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+          );
+          continue;
+        }
+        throw err;
+      }
+      const data = await res.json();
+      const reply = data?.choices?.[0]?.message?.content;
+      if (!reply) throw new Error('Groq returned an empty response');
+      return reply.trim();
+    } catch (err) {
+      lastErr = err;
+      if (isGroqQuotaError(err) && nextModelAfterQuota(model)) continue;
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Groq request failed: all models exhausted quota');
+}
+
 const SYSTEM_PROMPT =
   'You are an expert business advisor embedded inside "Ideon", a tool that helps ' +
   'founders turn ideas into actionable plans. A founder is asking questions about a specific ' +
@@ -78,39 +150,18 @@ Deno.serve(async (req: Request) => {
     const history = Array.isArray(body?.history) ? (body.history as unknown[]).slice(-20) : [];
 
     const messages = [
-      { role: 'system', content: `${SYSTEM_PROMPT}\n\nPLAN CONTEXT:\n${planContext}` },
+      { role: 'system' as const, content: `${SYSTEM_PROMPT}\n\nPLAN CONTEXT:\n${planContext}` },
       ...history.map((m) => {
         const item = m as { role?: string; content?: string };
         return {
-          role: item.role === 'assistant' ? 'assistant' : 'user',
+          role: (item.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
           content: String(item.content ?? '').slice(0, 4000),
         };
       }),
-      { role: 'user', content: message },
+      { role: 'user' as const, content: message },
     ];
 
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.5,
-        max_tokens: 1200,
-        messages,
-      }),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-
-    const data = await res.json();
-    const reply = data?.choices?.[0]?.message?.content;
-    if (!reply) throw new Error('Groq returned an empty response');
+    const reply = await groqChatMessages(apiKey, messages);
 
     return json({ reply });
   } catch (err) {

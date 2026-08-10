@@ -38,34 +38,79 @@ async function verifyUser(req: Request) {
   return data.user ?? null;
 }
 
-/** Call Groq with text (no JSON mode — we parse the raw text). */
-async function groqText(apiKey: string, systemPrompt: string, userPrompt: string) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+// ─────────────────────────────────────────────────────────────
+// Groq fallback chain — same shape as assistant-chat. The 70b
+// is the smartest llama on the free tier but has a 100k tokens-
+// per-day quota; llama-3.1-8b-instant is ~5x more generous and is
+// good enough for a YES/NO classifier. On a 429 we transparently
+// escalate to 8b-instant so the user's "Validate Idea" button
+// keeps working instead of returning a 500. Non-429 errors still
+// surface immediately (they are usually malformed-key or genuine
+// outages — retrying the same call won't help).
+// ─────────────────────────────────────────────────────────────
+const GROQ_MODEL_PRIMARY = 'llama-3.3-70b-versatile';
+const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
+const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
+
+function nextModelAfterQuota(currentModel: string): string | null {
+  const idx = MODEL_CHAIN.indexOf(currentModel as (typeof MODEL_CHAIN)[number]);
+  if (idx < 0 || idx === MODEL_CHAIN.length - 1) return null;
+  return MODEL_CHAIN[idx + 1] ?? null;
+}
+
+function isGroqQuotaError(err: unknown): boolean {
+  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+}
+
+async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<Response> {
+  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.1,
-      max_tokens: 256,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
+    body: JSON.stringify(body),
   });
+}
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+/** Call Groq with a system + user prompt. Escalates to the 8b fallback on 429. */
+async function groqText(apiKey: string, systemPrompt: string, userPrompt: string, maxTokens = 256, temperature = 0.1) {
+  let lastErr: unknown = null;
+  for (const model of MODEL_CHAIN) {
+    try {
+      const res = await groqCall(apiKey, {
+        model,
+        temperature,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (res.status === 429 && nextModelAfterQuota(model)) {
+          console.warn(
+            `[validate-idea] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+          );
+          continue;
+        }
+        throw err;
+      }
+      const data = await res.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Groq returned an empty response');
+      return content.trim();
+    } catch (err) {
+      lastErr = err;
+      if (isGroqQuotaError(err) && nextModelAfterQuota(model)) continue;
+      throw err;
+    }
   }
-
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Groq returned an empty response');
-  return content.trim();
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Groq request failed: all models exhausted quota');
 }
 
 Deno.serve(async (req: Request) => {
@@ -104,7 +149,13 @@ Deno.serve(async (req: Request) => {
 
     const reply = await groqText(apiKey, system, ideaText);
 
-    const isBusinessIdea = reply.toUpperCase() === 'YES';
+    // Tolerant parse: exact "YES"/"NO" first, then any message that contains
+    // YES as a standalone word. The classifier prompt is explicit but the 8b
+    // fallback has been known to emit " YES" or "YES.". We accept it as YES
+    // whenever the model clearly intended a YES, and otherwise treat it as
+    // NO so the user just sees the friendly "describe a product" prompt.
+    const normalized = reply.toUpperCase().trim();
+    const isBusinessIdea = normalized === 'YES' || /^YES\b/.test(normalized);
 
     return json({
       is_business_idea: isBusinessIdea,

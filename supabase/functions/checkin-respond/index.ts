@@ -38,34 +38,78 @@ async function verifyUser(req: Request) {
   return data.user ?? null;
 }
 
-/** Call Groq chat completions (OpenAI-compatible) with llama-3.3-70b-versatile. */
-async function groqChat(apiKey: string, systemPrompt: string, userPrompt: string) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+// ─────────────────────────────────────────────────────────────
+// Groq fallback chain — same shape as assistant-chat. The 70b
+// is the smartest llama on the free tier but has a 100k TPD
+// quota; llama-3.1-8b-instant is ~5x more generous and is good
+// enough for the warm check-in reply. On a 429 we transparently
+// escalate to 8b-instant so the user's check-in keeps getting a
+// reply instead of returning a 500. Non-429 errors still surface
+// immediately (they are usually auth/wiring — retrying won't help).
+// ─────────────────────────────────────────────────────────────
+const GROQ_MODEL_PRIMARY = 'llama-3.3-70b-versatile';
+const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
+const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
+
+function nextModelAfterQuota(currentModel: string): string | null {
+  const idx = MODEL_CHAIN.indexOf(currentModel as (typeof MODEL_CHAIN)[number]);
+  if (idx < 0 || idx === MODEL_CHAIN.length - 1) return null;
+  return MODEL_CHAIN[idx + 1] ?? null;
+}
+
+function isGroqQuotaError(err: unknown): boolean {
+  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+}
+
+async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<Response> {
+  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.7,
-      max_tokens: 512,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
+    body: JSON.stringify(body),
   });
+}
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+/** Send a system + user prompt to Groq; escalates to 8b-instant on 429. */
+async function groqChat(apiKey: string, systemPrompt: string, userPrompt: string, maxTokens = 512, temperature = 0.7) {
+  let lastErr: unknown = null;
+  for (const model of MODEL_CHAIN) {
+    try {
+      const res = await groqCall(apiKey, {
+        model,
+        temperature,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (res.status === 429 && nextModelAfterQuota(model)) {
+          console.warn(
+            `[checkin-respond] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+          );
+          continue;
+        }
+        throw err;
+      }
+      const data = await res.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Groq returned an empty response');
+      return content.trim();
+    } catch (err) {
+      lastErr = err;
+      if (isGroqQuotaError(err) && nextModelAfterQuota(model)) continue;
+      throw err;
+    }
   }
-
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Groq returned an empty response');
-  return content.trim();
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Groq request failed: all models exhausted quota');
 }
 
 Deno.serve(async (req: Request) => {
