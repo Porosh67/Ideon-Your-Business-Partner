@@ -166,7 +166,7 @@ export default function Reports() {
             return (
               <Link
                 key={report.id}
-                to={`/ideas/${report.idea_id}`}
+                to={`/reports/${report.id}`}
                 className="group flex cursor-pointer flex-col rounded-2xl border border-border bg-surface p-5 shadow-card transition-all duration-200 hover:border-primary/30 hover:shadow-card-hover active:scale-[0.98]"
               >
                 <div className="mb-3 flex items-start gap-3">
