@@ -141,10 +141,17 @@ Deno.serve(async (req: Request) => {
     }
 
     const system =
-      'You classify whether the user\'s text describes a business idea. ' +
-      'A business idea is a concept for a product or service that could generate revenue. ' +
-      'It typically includes what is offered, to whom, and/or how it creates value. ' +
-      'Questions, random statements, or topics unrelated to starting a business are NOT business ideas.\n' +
+      'You decide whether the user\'s message is the kind of text we should run a business-planing pipeline on.\n' +
+      '\n' +
+      'Answer YES when the user is clearly trying to: ' +
+      'describe a business, product, service, app, side-hustle, SaaS, agency, store, marketplace, or any other commercial venture; ' +
+      'give even a short or rough commercial concept (for example: a coffee shop in Lisbon, an app for tutors, a gym for seniors); ' +
+      'ask you to plan, research, brainstorm, evaluate, name, or otherwise generate around a business direction.\n' +
+      '\n' +
+      'Aim for the user\'s intent, not a checklist. You do NOT need an audience, a value claim, or a monetization story in the input. A terse two- or three-word idea that names an offer is a YES — it expresses the kind of commercial direction we want our researchers to flesh out.\n' +
+      '\n' +
+      'Answer NO only when the input is empty of business meaning, clearly unrelated to starting a commercial venture (a recipe, a personal diary entry, a weather question, a math problem, an unrelated software ask, a greeting, a creative writing prompt), or pure nonsense (random characters with no commercial read).\n' +
+      '\n' +
       'Respond with EXACTLY one word: YES or NO. No punctuation, no explanation.';
 
     const reply = await groqText(apiKey, system, ideaText);
