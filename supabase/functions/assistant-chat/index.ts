@@ -43,43 +43,102 @@ function getToken(req: Request): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Groq helpers (llama-3.3-70b-versatile — fast, conversational)
+// Groq helpers (llama-3.3-70b-versatile preferred, llama-3.1-8b-instant
+// fallback on 429). The 70b is the smartest model but has a 100k TPD (tokens-
+// per-day) quota on the free tier — the 8b is ~5x higher and is good enough
+// for ordinary chat replies. When the 70b's daily quota is exhausted the
+// free tier returns 429 ("Rate limit reached…"); rather than bubble that up
+// as a 500 to the user, transparently retry on the 8b so the chat keeps
+// answering. Non-429 errors still surface immediately (they are usually
+// malformed-key or genuine outages, not quota).
 // ─────────────────────────────────────────────────────────────
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_MODEL_PRIMARY = 'llama-3.3-70b-versatile';
+const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
+const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
 
-async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string, maxTokens = 200) {
-  // Per-call 25s cap. Without it, a wedged Groq connection can sit until the
-  // 60s Edge runtime limit, swallow all the budget, and produce a hard 500
-  // that propagates up to "we couldn't process that" while the user's UI
-  // was frozen for the full window.
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+/**
+ * Pick the next model after a 429. If we already used the fallback (8b)
+ * there is no further model to escalate to — rethrow so the user sees a
+ * clear "quota exhausted" error instead of retrying the same model in a
+ * loop.
+ */
+function nextModelAfterQuota(currentModel: string): string | null {
+  const idx = MODEL_CHAIN.indexOf(currentModel as (typeof MODEL_CHAIN)[number]);
+  if (idx < 0 || idx === MODEL_CHAIN.length - 1) return null;
+  return MODEL_CHAIN[idx + 1] ?? null;
+}
+
+/**
+ * True when the thrown error is a Groq 429 quota exhaustion. We detect it
+ * from the function's own error message ("Groq request failed (429): …")
+ * so the helper remains decoupled from the raw fetch URL.
+ */
+function isGroqQuotaError(err: unknown): boolean {
+  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+}
+
+async function groqCall(
+  apiKey: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<Response> {
+  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      temperature: 0.2,
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-    signal: AbortSignal.timeout(25_000),
+    body: JSON.stringify(body),
+    signal: signal ?? AbortSignal.timeout(25_000),
   });
+}
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string, maxTokens = 200) {
+  // Try each model in order; on 429 escalate to the next. The classify prompt
+  // is short and well within both models' output caps.
+  let lastErr: unknown = null;
+  for (const model of MODEL_CHAIN) {
+    try {
+      const res = await groqCall(
+        apiKey,
+        {
+          model,
+          temperature: 0.2,
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+        }
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (res.status === 429 && nextModelAfterQuota(model)) continue;
+        throw err;
+      }
+      const data = await res.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Groq returned an empty response');
+      return JSON.parse(content);
+    } catch (err) {
+      lastErr = err;
+      if (isGroqQuotaError(err) && nextModelAfterQuota(model)) {
+        // Escalate to the next model in the chain. Logged so we can see in
+        // the edge log when the fallback is engaged.
+        console.warn(
+          `[assistant-chat] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+        );
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Groq returned an empty response');
-  return JSON.parse(content);
+  // We exited the chain without returning — every model returned 429.
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Groq request failed: all models exhausted quota');
 }
 
 async function groqChat(
@@ -88,32 +147,44 @@ async function groqChat(
   maxTokens = 1024,
   temperature = 0.7
 ) {
-  // Same 25s cap as groqJson — keeps a wedged Groq call from eating the
-  // 60s Edge budget on the longer reply pipeline stages.
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      temperature,
-      max_tokens: maxTokens,
-      messages,
-    }),
-    signal: AbortSignal.timeout(25_000),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+  // Same fallback chain as groqJson. The reply length knobs (max_tokens 1100
+  // vs. 1600 etc.) are unchanged from before; only the model picks escalate.
+  let lastErr: unknown = null;
+  for (const model of MODEL_CHAIN) {
+    try {
+      const res = await groqCall(
+        apiKey,
+        {
+          model,
+          temperature,
+          max_tokens: maxTokens,
+          messages,
+        }
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (res.status === 429 && nextModelAfterQuota(model)) continue;
+        throw err;
+      }
+      const data = await res.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Groq returned an empty response');
+      return content.trim();
+    } catch (err) {
+      lastErr = err;
+      if (isGroqQuotaError(err) && nextModelAfterQuota(model)) {
+        console.warn(
+          `[assistant-chat] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+        );
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Groq returned an empty response');
-  return content.trim();
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Groq request failed: all models exhausted quota');
 }
 
 // ─────────────────────────────────────────────────────────────
