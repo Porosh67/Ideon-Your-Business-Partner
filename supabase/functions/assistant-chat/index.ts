@@ -355,6 +355,14 @@ async function handlePlan(
   }
 
   // ── Semantic memory: index the saved idea + conversation (best-effort) ──
+  // Start BOTH memory writes in parallel up front, then run them concurrently
+  // with the summary groqChat. Previously these were sequential `await`s that
+  // could each eat the full 30s `callPipeline` timeout — doubling the
+  // user-visible pipeline latency whenever semantic-memory was slow. By
+  // starting them now and awaiting AT THE END (same pattern as `handleReply`),
+  // total pipeline latency here is roughly max(summary, store ×2) instead of
+  // summary + store + store.
+  const memoryStorePromises: Promise<void>[] = [];
   if (ideaId) {
     const ideaContent = [
       `IDEA: ${ideaText}`,
@@ -370,17 +378,17 @@ async function handlePlan(
     ]
       .filter((s): s is string => Boolean(s && s.length > 3))
       .join('\n');
-    await storeMemory(token, { source_type: 'idea', source_id: ideaId, content: ideaContent });
+    memoryStorePromises.push(storeMemory(token, { source_type: 'idea', source_id: ideaId, content: ideaContent }));
   }
   if (conversationId) {
-    await storeMemory(token, {
+    memoryStorePromises.push(storeMemory(token, {
       source_type: 'conversation',
       source_id: conversationId,
       content: `CONVERSATION ABOUT: ${ideaText.slice(0, 300)}`,
-    });
+    }));
   }
 
-  // Friendly summary for the chat
+  // Friendly summary for the chat — runs concurrently with the memory writes.
   const summary = await groqChat(
     apiKey,
     [
@@ -404,6 +412,14 @@ async function handlePlan(
   );
 
   const replyWithPill = summary + '\n\n📊 Full business plan and market breakdown generated and saved to your Reports section.';
+
+  // Best-effort: ensure the saved-idea + conversation memory writes both
+  // actually complete before we return. storeMemory() has its own try/catch
+  // so these awaits never throw. Running them concurrently with the summary
+  // chat means total pipeline latency here is max(summary, store × 2)
+  // instead of summary + store + store.
+  await Promise.all(memoryStorePromises);
+
   return { phase: 'plan' as const, idea_id: ideaId, plan, roadmap, reply: replyWithPill, reality_check: realityResult.reality_check, competitor_snapshot: realityResult.competitor_snapshot };
 }
 
@@ -635,15 +651,18 @@ async function handleReply(
     }
   }
 
-  // ── Store a conversation memory once the thread has started (best-effort) ──
-  if (conversationId && token) {
-    const firstUserMsg = recent.find((h) => h.role === 'user')?.content ?? message;
-    await storeMemory(token, {
-      source_type: 'conversation',
-      source_id: conversationId,
-      content: `CONVERSATION: ${firstUserMsg.slice(0, 300)}`,
-    });
-  }
+  // ── Store a conversation memory once the thread has started. Run in
+  //    PARALLEL with the reply — do NOT block this function on the Gemini
+  //    embed call. Blocking was leaving the user staring at "Ideon is thinking"
+  //    for several extra seconds every reply. storeMemory() already swallows
+  //    errors, so the await at the bottom of handleReply is safe.
+  const memoryStorePromise: Promise<void> = (conversationId && token)
+    ? storeMemory(token, {
+        source_type: 'conversation',
+        source_id: conversationId,
+        content: `CONVERSATION: ${(recent.find((h) => h.role === 'user')?.content ?? message).slice(0, 300)}`,
+      })
+    : Promise.resolve();
 
   const lengthNote = LENGTH_GUIDANCE[detectLengthLevel(message)];
 
@@ -727,6 +746,12 @@ async function handleReply(
     needsWeb ? 1600 : 1100,
     0.7
   );
+
+  // Best-effort: ensure the conversation memory is actually persisted before
+  // returning. storeMemory() has its own try/catch so this await never throws.
+  // Running this AFTER groqChat means total reply latency here is roughly
+  // max(groqChat, storeMemory) instead of groqChat + storeMemory.
+  await memoryStorePromise;
 
   return { phase: 'reply' as const, reply };
 }
