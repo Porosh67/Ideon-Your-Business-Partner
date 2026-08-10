@@ -1456,39 +1456,21 @@ export default function Dashboard() {
       if (!isCurrent()) return;
       loadHistory(userId);
     } catch (err) {
-      // Translate the raw error (which often contains "AbortError",
-      // "Groq request failed (500): …", or "The operation was aborted due
-      // to timeout") into a single, human-readable fallback the user can
-      // understand and react to. The earlier code surfaced the raw errMsg
-      // directly as the assistant bubble text — which made reports like
-      // "Signal timed out", "AbortError: aborted", and Groq status lines
-      // leak into the conversation. This is the user-facing equivalent
-      // of the wrap-with-fallback I added to assistant-chat's own
-      // summary and roadmap sub-pipelines — same idea, applied on the
-      // client.
-      const raw = err instanceof Error ? err.message : '';
-      const friendly =
-        /\baborted\b|timeout|timed out|AbortError|signal/i.test(raw)
-          ? 'Ideon took too long to respond. I\'ve left your thread intact — feel free to try again, or rephrase as a fresh message.'
-          : /\bunauthorized|401\b/i.test(raw)
-          ? 'Your session ended — please sign in again and retry.'
-          : raw && raw.length > 0
-          ? `Ideon hit a snag (${raw.slice(0, 120)}). Anything you'd already sent is still in this thread — try again and we'll pick up where we left off.`
-          : 'Ideon hit a snag. Anything you\'d already sent is still in this thread — try again and we\'ll pick up where we left off.';
-
+      const errMsg =
+        err instanceof Error ? err.message : 'Something went wrong. Please try again.';
       if (isCurrent()) {
         setPipelineStage(null);
         setShowTyping(false);
         setInputError('We couldn\'t process that — try again?');
       }
-      // Persist the friendly error message so the user has visible
-      // feedback in the thread even when the main reply pipeline fails.
+      // Persist the error message so the user has visible feedback in the
+      // thread even when the main reply pipeline fails.
       try {
         await supabase.from('conversation_messages').insert({
           conversation_id: convId,
           user_id: userId,
           role: 'assistant',
-          content: friendly,
+          content: errMsg,
         });
         if (!isCurrent()) return;
         setMessages((prev) => [
@@ -1498,7 +1480,7 @@ export default function Dashboard() {
             conversation_id: convId,
             user_id: userId,
             role: 'assistant',
-            content: friendly,
+            content: errMsg,
             created_at: new Date().toISOString(),
           },
         ]);

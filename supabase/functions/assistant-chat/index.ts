@@ -191,21 +191,12 @@ async function groqChat(
 // Call the deployed pipeline functions (server-to-server with the
 // caller's token, so every function re-verifies the same JWT)
 // ─────────────────────────────────────────────────────────────
-async function callPipeline(
-  token: string,
-  name: string,
-  body: Record<string, unknown>,
-  // 25s default ceiling — comfortably above Bright Data/Groq normal-case
-  // (8-20s) and well below the Edge gateway's 60s hard kill. The Dashboard's
-  // Case A pipeline stacks: classify (~5s) + research (~20s) + plan
-  // (~30s effective see below) = wall-time budget inside this single
-  // assistant-chat invocation must remain under ~50s or the upstream 60s
-  // gateway gracefully 504s — the user's report of "Signal timed out"
-  // matches that exact failure mode in the edge-function logs (assistant-chat
-  // returning exactly 30s+ and 60s+ timeouts).
-  timeoutMs = 25_000
-) {
+async function callPipeline(token: string, name: string, body: Record<string, unknown>) {
   const url = `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1/${name}`;
+  // 30s ceiling for any server-to-server function call. The research-market
+  // and generate-plan sub-pipelines themselves fetch the open web / Groq on
+  // their own time budgets; this makes a hung sub-call fail fast here
+  // instead of waiting for the Edge gateway's 60s kill.
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -213,7 +204,7 @@ async function callPipeline(
       Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(30_000),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -356,44 +347,13 @@ async function handleClassify(apiKey: string, message: string, history: { role: 
   };
 }
 
-/** Stage 1 of the full pipeline — live market research.
- *
- *  Failure here is NON-FATAL: if research-market stalls, we still WANT the
- *  Dashboard Case A pipeline to continue into plan generation with an empty
- *  research envelope so the user gets a plan (degraded, but still useful).
- *  This was the "Signal timed out" report — research-market's old
- *  `Promise.all` rejected the whole stage on a single Bright Data miss,
- *  which then radiated up through plan → into the dashboard's outer catch,
- *  which the user saw as 'Signal timed out'.
- */
+/** Stage 1 of the full pipeline — live market research. */
 async function handleResearch(token: string, ideaText: string) {
-  try {
-    const research = await callPipeline(token, 'research-market', { idea_text: ideaText }, 22_000);
-    return { research, research_status: 'ok' as const };
-  } catch (err) {
-    // Surface the cause in the function log but proceed with a sentinel
-    // envelope so plan generation still completes. The downstream plan
-    // generator falls back to its own reasoning when `queries` is the empty
-    // array, which is exactly the right behavior.
-    const reason = err instanceof Error ? err.message : String(err);
-    console.warn(`[assistant-chat] research-market unavailable (${reason}); using empty envelope`);
-    return {
-      research: { idea_text: ideaText, queries: [], research_summary: { total_results: 0, top_competitors: [] }, partial: true, failed_queries: 0, generated_at: new Date().toISOString() },
-      research_status: 'partial' as const,
-      research_error: reason,
-    };
-  }
+  const research = await callPipeline(token, 'research-market', { idea_text: ideaText });
+  return { research };
 }
 
-/** Stage 2 of the full pipeline — plan + roadmap, then persist everything.
- *
- *  Sub-call ceilings are deliberately tight (22s / 20s / fallback) so the
- *  FULL plan-phase aggregate stays under ~50s and well clear of the Edge
- *  gateway's 60s hard kill — the dashboard's "Signal timed out" symptom was
- *  the 30s callPipeline ceiling propagating up and tripping the gateway on
- *  cold runs. Persistence happens BEFORE the summary chat so a stalled
- *  summary can never strand a saved plan.
- */
+/** Stage 2 of the full pipeline — plan + roadmap, then persist everything. */
 async function handlePlan(
   token: string,
   user: { id: string },
@@ -402,24 +362,13 @@ async function handlePlan(
   research: unknown,
   conversationId?: string
 ) {
-  // generate-plan runs first — it's the spine of everything that follows.
-  // 22s ceiling: leaves 38s of the 60s gateway budget for roadmap +
-  // reality-check + persistence + summary chat.
-  const plan = await callPipeline(
-    token,
-    'generate-plan',
-    { idea_text: ideaText, research_data: research },
-    22_000
-  );
-  // Run roadmap generation and reality check in parallel for zero added latency.
-  // The roadmap call has a soft .catch so a stalled Gemini request falls back
-  // to an empty envelope and persistence still completes (and the user
-  // still sees the plan, just without a roadmap).
+  const plan = await callPipeline(token, 'generate-plan', {
+    idea_text: ideaText,
+    research_data: research,
+  });
+  // Run roadmap generation and reality check in parallel for zero added latency
   const [roadmap, realityResult] = await Promise.all([
-    callPipeline(token, 'generate-roadmap', { business_plan: plan }, 20_000).catch((err) => {
-      console.warn(`[assistant-chat] generate-roadmap unavailable (${err instanceof Error ? err.message : err}); using empty roadmap`);
-      return { skills_to_learn: [], checklist_30_days: [], skill_gap_summary: '', generated_at: new Date().toISOString() };
-    }),
+    callPipeline(token, 'generate-roadmap', { business_plan: plan }),
     handleRealityCheck(apiKey, ideaText, research, plan as Record<string, unknown>),
   ]);
 
@@ -511,38 +460,27 @@ async function handlePlan(
   }
 
   // Friendly summary for the chat — runs concurrently with the memory writes.
-  // Wrapped in try/catch with a static-template fallback so a stalled or
-  // quota-exhausted summary chat can NEVER abort the response and strand
-  // the already-persisted plan — once the plan + roadmap are saved to the
-  // DB, the user must always get a usable result back, even if our polite
-  // 4-sentence greeting couldn't go out.
-  let summary: string;
-  try {
-    summary = await groqChat(
-      apiKey,
-      [
-        {
-          role: 'system',
-          content:
-            'You are a friendly startup coach. Write a SHORT conversational message (2-4 sentences) telling the founder their researched plan is ready. ' +
-            'Mention the idea, the target customer, and the rough cost estimate, and note that a 30-day roadmap with skills to learn was also generated. ' +
-            'Warm and encouraging, not salesy. No markdown, no bullet lists.',
-        },
-        {
-          role: 'user',
-          content:
-            `IDEA: ${ideaText}\n` +
-            `TARGET CUSTOMER: ${plan.target_customer ?? 'n/a'}\n` +
-            `COST ESTIMATE: ${plan.cost_estimate ?? 'n/a'}`,
-        },
-      ],
-      320,
-      0.7
-    );
-  } catch (summaryErr) {
-    console.warn(`[assistant-chat] summary chat unavailable (${summaryErr instanceof Error ? summaryErr.message : summaryErr}); using template reply`);
-    summary = `Your researched plan for "${ideaText.slice(0, 80)}" is ready — target customer: ${plan.target_customer ?? 'analyzed'}, rough cost estimate: ${plan.cost_estimate ?? 'included'}. A 30-day roadmap and skills-to-learn section are also in the saved report.`;
-  }
+  const summary = await groqChat(
+    apiKey,
+    [
+      {
+        role: 'system',
+        content:
+          'You are a friendly startup coach. Write a SHORT conversational message (2-4 sentences) telling the founder their researched plan is ready. ' +
+          'Mention the idea, the target customer, and the rough cost estimate, and note that a 30-day roadmap with skills to learn was also generated. ' +
+          'Warm and encouraging, not salesy. No markdown, no bullet lists.',
+      },
+      {
+        role: 'user',
+        content:
+          `IDEA: ${ideaText}\n` +
+          `TARGET CUSTOMER: ${plan.target_customer ?? 'n/a'}\n` +
+          `COST ESTIMATE: ${plan.cost_estimate ?? 'n/a'}`,
+      },
+    ],
+    320,
+    0.7
+  );
 
   const replyWithPill = summary + '\n\n📊 Full business plan and market breakdown generated and saved to your Reports section.';
 

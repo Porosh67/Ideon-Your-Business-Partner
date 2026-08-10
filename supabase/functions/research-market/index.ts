@@ -242,12 +242,7 @@ Deno.serve(async (req: Request) => {
       return json({ error: 'BRIGHT_DATA_API_KEY is not configured' }, 500);
     }
 
-    // Build targeted research queries from the idea. We use Promise.allSettled
-    // (NOT Promise.all) so a single Bright Data timeout/HTTP-error doesn't kill
-    // the whole dashboard pipeline — the plan generator still gets partial
-    // results from the queries that succeeded (matched against the user prompt:
-    // "Real business-idea queries fail with Signal timed out"). 200 with a
-    // 'partial' flag is preferable to a 500 that aborts the entire Case A path.
+    // Build targeted research queries from the idea
     const shortIdea = ideaText.length > 120 ? ideaText.slice(0, 120) : ideaText;
     const queries = [
       `${shortIdea} competitors`,
@@ -255,51 +250,13 @@ Deno.serve(async (req: Request) => {
       `${shortIdea} market trend`,
     ];
 
-    // Per-query ceiling so a stalled SERP can't pin the whole batch to its
-    // own 30s budget. 12s is well above Bright Data's normal 3-8s response
-    // but well below the assistant-chat harness timeout.
-    const PER_QUERY_TIMEOUT_MS = 12_000;
-    const settled = await Promise.allSettled(
-      queries.map((q) =>
-        Promise.race<unknown>([
-          serpSearch(apiKey, q),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`SERP query "${q}" timed out after ${PER_QUERY_TIMEOUT_MS / 1000}s`)), PER_QUERY_TIMEOUT_MS)
-          ),
-        ]).catch((err) => {
-          // Swallow into a typed failure so the plan generator can still read
-          // a structured envelope (organic=[]) instead of nothing.
-          return {
-            query: q,
-            search_engine: 'google',
-            organic: [],
-            diagnostic: { error: err instanceof Error ? err.message : String(err) },
-          };
-        })
-      )
-    );
+    const results = await Promise.all(queries.map((q) => serpSearch(apiKey, q)));
 
-    const results = settled.map((s, i) => {
-      if (s.status === 'fulfilled') return s.value as Record<string, unknown>;
-      // Promise.allSettled rejection that escaped the .catch above (shouldn't,
-      // because we wrap each promise with .catch, but kept for safety).
-      console.error(`research-market: query "${queries[i]}" rejected`, s.reason);
-      return {
-        query: queries[i],
-        search_engine: 'google',
-        organic: [],
-        diagnostic: { error: s.reason instanceof Error ? s.reason.message : String(s.reason) },
-      };
-    });
-
-    const failedCount = results.filter((r) => Array.isArray(r.organic) && r.organic.length === 0).length;
-    const partial = failedCount > 0 && failedCount < results.length;
-
-    // Log diagnostics server-side when a query produced no organic results, so
-    // the Edge Function logs show the real Bright Data cause.
+    // Log diagnostics server-side (visible in Edge Function logs) when a query
+    // produced no organic results.
     for (const r of results) {
       if (Array.isArray(r.organic) && r.organic.length === 0) {
-        console.error(`research-market: no organic results for "${(r as { query?: string }).query}"`, JSON.stringify((r as { diagnostic?: unknown }).diagnostic ?? {}).slice(0, 2000));
+        console.error(`research-market: no organic results for "${r.query}"`, JSON.stringify(r.diagnostic ?? {}).slice(0, 2000));
       }
     }
 
@@ -307,15 +264,11 @@ Deno.serve(async (req: Request) => {
       idea_text: ideaText,
       queries: results,
       research_summary: {
-        total_results: results.reduce((sum, r) => sum + (Array.isArray(r.organic) ? (r.organic as unknown[]).length : 0), 0),
+        total_results: results.reduce((sum, r) => sum + (Array.isArray(r.organic) ? r.organic.length : 0), 0),
         top_competitors: results
-          .flatMap((r) => (Array.isArray(r.organic) ? (r.organic as Record<string, unknown>[]) : []))
+          .flatMap((r) => (Array.isArray(r.organic) ? r.organic : []))
           .slice(0, 10),
       },
-      // Surface partial-success explicitly so the plan generator knows whether
-      // to trust the research or treat it as a thin slice.
-      partial,
-      failed_queries: failedCount,
       generated_at: new Date().toISOString(),
     });
   } catch (err) {
