@@ -635,15 +635,18 @@ async function handleReply(
     }
   }
 
-  // ── Store a conversation memory once the thread has started (best-effort) ──
-  if (conversationId && token) {
-    const firstUserMsg = recent.find((h) => h.role === 'user')?.content ?? message;
-    await storeMemory(token, {
-      source_type: 'conversation',
-      source_id: conversationId,
-      content: `CONVERSATION: ${firstUserMsg.slice(0, 300)}`,
-    });
-  }
+  // ── Store a conversation memory once the thread has started. Run in
+  //    PARALLEL with the reply — do NOT block this function on the Gemini
+  //    embed call. Blocking was leaving the user staring at "Ideon is thinking"
+  //    for several extra seconds every reply. storeMemory() already swallows
+  //    errors, so the await at the bottom of handleReply is safe.
+  const memoryStorePromise: Promise<void> = (conversationId && token)
+    ? storeMemory(token, {
+        source_type: 'conversation',
+        source_id: conversationId,
+        content: `CONVERSATION: ${(recent.find((h) => h.role === 'user')?.content ?? message).slice(0, 300)}`,
+      })
+    : Promise.resolve();
 
   const lengthNote = LENGTH_GUIDANCE[detectLengthLevel(message)];
 
@@ -727,6 +730,12 @@ async function handleReply(
     needsWeb ? 1600 : 1100,
     0.7
   );
+
+  // Best-effort: ensure the conversation memory is actually persisted before
+  // returning. storeMemory() has its own try/catch so this await never throws.
+  // Running this AFTER groqChat means total reply latency here is roughly
+  // max(groqChat, storeMemory) instead of groqChat + storeMemory.
+  await memoryStorePromise;
 
   return { phase: 'reply' as const, reply };
 }
