@@ -155,17 +155,24 @@ export default function Auth() {
     }
   }, [mode]);
 
-  // Navbar "Sign in" / "Sign up" call navigate('/auth', { state: { mode } })
-  // even when we're already on /auth. `mode` is only read once on mount, so
-  // sync the form when a NEW mode arrives via router state — otherwise the
-  // same-path navigation looks like a no-op ("overlay resolves, back to the
-  // same page").
+  // Navbar "Sign in" / "Sign up" (and the inline "Create an account"/"Sign
+  // in" toggle) call navigate('/auth', { state: { mode } }) even when we're
+  // already on /auth. The form's `mode` is only read once on mount, so sync
+  // when a NEW mode arrives via router state — otherwise same-path navigation
+  // looks like a no-op ("overlay resolves, back to the same page").
+  //
+  // Dep is `location.state` only — NOT `mode`. If `mode` were in deps, every
+  // local setMode() (e.g. the signup-success path's `setMode('signin')`) would
+  // re-fire this effect, see the stale location.state.mode from the navbar
+  // link, and silently revert the mode to its old value. That bug made the
+  // success path look like it never landed on the sign-in form.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const stateMode = (location.state as { mode?: Mode } | null)?.mode;
     if (stateMode && stateMode !== mode) {
       setMode(stateMode);
     }
-  }, [location.state, mode]);
+  }, [location.state]);
 
   const go = () => navigate(from && from !== '/auth' ? from : '/dashboard', { replace: true });
 
