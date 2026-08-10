@@ -1286,7 +1286,12 @@ export default function Dashboard() {
     isCurrent: () => boolean;
     replaceAssistantMessageId?: string;
   }): Promise<void> {
-    if (!user) return;
+    // Race protection: if the user signed out mid-pipeline, THROW (don't
+    // return silently) so the outer handleSend / handleRegenerate / handleConfirmEdit
+    // finally block always runs and clears the typing indicator. Without this,
+    // `setShowTyping(true)` (set BEFORE we got here) would stay stuck because
+    // nothing else in this stack flips it back to false on a silent return.
+    if (!user) throw new Error('You signed out before Ideon could reply.');
     const userId = user.id;
 
     try {
@@ -1672,7 +1677,23 @@ export default function Dashboard() {
       }
       return;
     }
-    if (!conv || !user) return;
+    if (!conv || !user) {
+      // Race protection: the user signed out (or the new conversation row
+      // never materialised) after we already flipped `setShowTyping(true)`.
+      // Always reset every busy flag here so the composer doesn't get stuck
+      // on "Ideon is thinking" forever — without this they would only be
+      // cleared by the outer `finally`, which we are about to skip via
+      // `return` in this thread. (Bug: prior version returned silently
+      // and left the typing indicator up.)
+      if (isCurrent()) {
+        sendingRef.current = false;
+        setSending(false);
+        setShowTyping(false);
+        setPipelineStage(null);
+        setInputError('Your session ended mid-send — please try again?');
+      }
+      return;
+    }
     const convId = conv.id;
 
     // Upload attachments (if any) + link them to the new user message.
@@ -1774,11 +1795,25 @@ export default function Dashboard() {
         // ignore
       }
     } finally {
-      // ALWAYS reset the busy flags — even if a nested catch threw, this
-      // runs and unfreezes the composer.
+      // ALWAYS reset every busy flag — even if a nested catch threw, this
+      // runs and unfreezes the composer. We clear ALL flags here (`sending`,
+      // `showTyping`, `pipelineStage`) rather than relying on each
+      // sub-function to clear its own, because:
+      //   • runAssistantReply's only `setShowTyping(false)` lives inside its
+      //     catch block — that's never reached on a silent early-return or
+      //     on a successful reply (where the success path clears it
+      //     individually, but a new-chat mid-request races).
+      //   • Default to clearing here is the safest invariant: any code path
+      //     that finishes — whether by resolve, throw, or internal skip —
+      //     ends with the composer usable again and the typing indicator
+      //     hidden. This was the bug that produced the "Just loading!"
+      //     report: a wedged edge call rendered the typing indicator stuck
+      //     because no finally clause ever cleared it.
       if (isCurrent()) {
         sendingRef.current = false;
         setSending(false);
+        setShowTyping(false);
+        setPipelineStage(null);
       }
     }
   };

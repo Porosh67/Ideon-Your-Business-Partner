@@ -48,6 +48,10 @@ function getToken(req: Request): string {
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string, maxTokens = 200) {
+  // Per-call 25s cap. Without it, a wedged Groq connection can sit until the
+  // 60s Edge runtime limit, swallow all the budget, and produce a hard 500
+  // that propagates up to "we couldn't process that" while the user's UI
+  // was frozen for the full window.
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -64,6 +68,7 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
         { role: 'user', content: userPrompt },
       ],
     }),
+    signal: AbortSignal.timeout(25_000),
   });
 
   if (!res.ok) {
@@ -83,6 +88,8 @@ async function groqChat(
   maxTokens = 1024,
   temperature = 0.7
 ) {
+  // Same 25s cap as groqJson — keeps a wedged Groq call from eating the
+  // 60s Edge budget on the longer reply pipeline stages.
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -95,6 +102,7 @@ async function groqChat(
       max_tokens: maxTokens,
       messages,
     }),
+    signal: AbortSignal.timeout(25_000),
   });
 
   if (!res.ok) {
@@ -114,6 +122,10 @@ async function groqChat(
 // ─────────────────────────────────────────────────────────────
 async function callPipeline(token: string, name: string, body: Record<string, unknown>) {
   const url = `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1/${name}`;
+  // 30s ceiling for any server-to-server function call. The research-market
+  // and generate-plan sub-pipelines themselves fetch the open web / Groq on
+  // their own time budgets; this makes a hung sub-call fail fast here
+  // instead of waiting for the Edge gateway's 60s kill.
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -121,6 +133,7 @@ async function callPipeline(token: string, name: string, body: Record<string, un
       Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

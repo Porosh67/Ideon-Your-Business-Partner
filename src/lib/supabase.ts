@@ -68,10 +68,14 @@ export async function waitForSession(): Promise<Session | null> {
 }
 
 // Hard ceiling on how long a single Edge Function call can occupy a request.
-// Two minutes is well above any legit response (classify + reply ~6s, full
-// research + plan pipeline ~30s) but well below the point where a stuck
-// request would leave the user staring at "Ideon is thinking" forever.
-const DEFAULT_EDGE_FN_TIMEOUT_MS = 120_000;
+// 90s is well above any legit response (classify + reply ~6s, full research +
+// plan pipeline ~30s) but well below the worst-case where the Edge runtime
+// itself kills the call at 60s and the client keeps the typing indicator up
+// for another minute. Lowered from 120s → 90s so a wedged server reaches the
+// user-facing error message BEFORE the Edge 60s hard kill, rather than
+// after — that ordering is what was producing the "Just loading forever"
+// symptom.
+const DEFAULT_EDGE_FN_TIMEOUT_MS = 90_000;
 
 /** Parse whatever JSON the response sent back, even on non-OK status. */
 async function readJsonSafe(res: Response): Promise<unknown> {

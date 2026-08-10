@@ -114,6 +114,10 @@ async function geminiGenerate(apiKey: string, system: string, parts: Record<stri
   let lastError: Error | null = null;
   for (const model of candidates) {
     try {
+      // 25s cap on multimodal chat generation — the document+image pipeline
+      // can run several Gemini calls in series, so each must leave enough
+      // budget for the rest of the function. Without this, a wedged Gemini
+      // call can hit the 60s Edge limit on the first attempt.
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
         {
@@ -124,6 +128,7 @@ async function geminiGenerate(apiKey: string, system: string, parts: Record<stri
             contents: [{ role: 'user', parts }],
             generationConfig: { temperature: 0.5, maxOutputTokens: 1500 },
           }),
+          signal: AbortSignal.timeout(25_000),
         },
       );
 
@@ -168,6 +173,9 @@ async function embedText(apiKey: string, text: string): Promise<number[]> {
   let lastError: Error | null = null;
   for (const model of candidates) {
     try {
+      // 20s cap per candidate (matches semantic-memory). Without it, a
+      // wedged Gemini embed call can hold the Edge slot for 60s and trigger
+      // the runtime kill — which then surfaces as a hard 500 to the user.
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${encodeURIComponent(apiKey)}`,
         {
@@ -178,6 +186,7 @@ async function embedText(apiKey: string, text: string): Promise<number[]> {
             content: { parts: [{ text: text.slice(0, 8000) }] },
             outputDimensionality: EMBEDDING_DIM,
           }),
+          signal: AbortSignal.timeout(20_000),
         },
       );
 

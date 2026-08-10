@@ -52,6 +52,10 @@ function compactSnippet(value: unknown, maxLen = 800): string {
 async function serpSearch(apiKey: string, query: string) {
   const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&gl=us&brd_json=1`;
 
+  // 30s ceiling. The recent 65s edge runtime 500s in production were
+  // caused by stuck Bright Data SERP calls; capping the upstream fetch
+  // here means we surface a clean 500 from web-search itself in under
+  // half the Edge budget, instead of being killed silently by the runtime.
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
     headers: {
@@ -63,6 +67,7 @@ async function serpSearch(apiKey: string, query: string) {
       url,
       format: 'raw',
     }),
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!res.ok) {

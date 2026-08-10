@@ -61,6 +61,9 @@ async function embedText(apiKey: string, text: string): Promise<number[]> {
   let lastError: Error | null = null;
   for (const model of candidates) {
     try {
+      // 20s ceiling per candidate model — keeps a wedged Gemini embed
+      // call from eating the entire Edge runtime budget. Note: the host
+      // semantic-memory/chat-attachment functions both share this body.
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${encodeURIComponent(apiKey)}`,
         {
@@ -71,6 +74,7 @@ async function embedText(apiKey: string, text: string): Promise<number[]> {
             content: { parts: [{ text: text.slice(0, 8000) }] },
             outputDimensionality: EMBEDDING_DIM,
           }),
+          signal: AbortSignal.timeout(20_000),
         },
       );
 
