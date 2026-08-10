@@ -37,7 +37,7 @@ import {
 
 function formatDate(d: string): string {
   return new Date(d).toLocaleDateString(undefined, {
-    year: 'long',
+    year: 'numeric',
     month: 'long',
     day: 'numeric',
   });
