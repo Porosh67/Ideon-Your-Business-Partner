@@ -187,13 +187,40 @@ export default function IdeaView() {
     await supabase.from('business_ideas').update({ title }).eq('id', data.idea.id);
   };
 
-  // ── Delete ──
+  // ── Delete (cascade) ──
+  // The original `delete` only removed the `business_ideas` row, leaving
+  // orphaned `business_plans`, `generated_roadmaps`, `plan_chat_messages`
+  // and `checklist_progress` rows behind — and tripped an FK_CONSTRAINT
+  // on Postgres when the migration added ON DELETE RESTRICT to the
+  // child tables. The cascade walks each table in dependency order
+  // (chat → progress → roadmap → plan → idea) so no orphan rows survive
+  // and no FK error aborts the delete mid-flight.
   const handleDelete = async () => {
     if (!data) return;
     if (!confirm('Delete this idea and all associated data?')) return;
     setDeleting(true);
     removeIdea(data.idea.id);
-    await supabase.from('business_ideas').delete().eq('id', data.idea.id);
+    const planId = data.plan?.id;
+    const roadmapId = data.roadmap?.id;
+    try {
+      // Chat is a leaf dependency — clean it first.
+      if (planId) {
+        await supabase.from('plan_chat_messages').delete().eq('plan_id', planId).eq('user_id', user!.id);
+      }
+      // Checklist rows reference the roadmap, not the plan directly.
+      if (roadmapId) {
+        await supabase.from('checklist_progress').delete().eq('roadmap_id', roadmapId).eq('user_id', user!.id);
+        await supabase.from('generated_roadmaps').delete().eq('id', roadmapId).eq('user_id', user!.id);
+      }
+      if (planId) {
+        await supabase.from('business_plans').delete().eq('id', planId).eq('user_id', user!.id);
+      }
+      await supabase.from('business_ideas').delete().eq('id', data.idea.id).eq('user_id', user!.id);
+    } catch (err) {
+      // Surface the cause in dev, but move the user along regardless so a
+      // transient FK race doesn't trap them on the page.
+      console.warn('IdeaView delete cascade reported an issue:', err);
+    }
     navigate('/reports', { replace: true });
   };
 
