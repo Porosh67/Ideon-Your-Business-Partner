@@ -1,0 +1,14 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rounded gradient tile -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4F7DF3"/>
+      <stop offset="1" stop-color="#3B5BDC"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#g)"/>
+  <!-- AI spark (white) -->
+  <path d="M32 8C33 16.9 39.1 23 48 24C39.1 25 33 31.1 32 40C31 31.1 24.9 25 16 24C24.9 23 31 16.9 32 8Z" fill="white"/>
+  <!-- Small trailing spark -->
+  <path d="M49.6 42.4C50.4 45.1 51.5 46.2 54.2 47C51.5 47.8 50.4 48.9 49.6 51.6C48.8 48.9 47.7 47.8 45 47C47.7 46.2 48.8 45.1 49.6 42.4Z" fill="white" opacity="0.75"/>
+</svg>

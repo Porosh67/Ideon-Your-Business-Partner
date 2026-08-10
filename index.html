@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg?v=2" />
+    <link rel="alternate icon" href="/logo.svg?v=2" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/logo.svg?v=2" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ideon — Turn ideas into researched plans</title>
+      <!-- seo:start -->
+    <meta name="description" content="Turn your business idea into a researched plan. Live market research, a structured business plan, and a 30-day roadmap — in minutes." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Ideon — Turn ideas into researched plans" />
+    <meta property="og:description" content="Turn your business idea into a researched plan. Live market research, a structured business plan, and a 30-day roadmap — in minutes." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Ideon — Turn ideas into researched plans" />
+    <meta name="twitter:description" content="Turn your business idea into a researched plan. Live market research, a structured business plan, and a 30-day roadmap — in minutes." />
+    <script type="application/ld+json">{"@context": "https://schema.org", "@type": "WebSite", "name": "Ideon \u2014 Turn ideas into researched plans", "description": "Turn your business idea into a researched plan. Live market research, a structured business plan, and a 30-day roadmap \u2014 in minutes."}</script>
+    <!-- seo:end -->
+    <!-- Theme applied BEFORE first paint so fresh/incognito sessions never
+         flash the dark palette. Defaults to light; dark remains available via
+         the toggle. Mirrored in src/main.tsx for the same reason. -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('ideon-theme') || localStorage.getItem('bcp-theme');
+          var theme = stored === 'light' || stored === 'dark' ? stored : 'light';
+          if (stored) localStorage.removeItem('bcp-theme');
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

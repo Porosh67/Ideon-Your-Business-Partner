@@ -1,0 +1,8 @@
+{
+  "browser": {
+    "launchOptions": {
+      "chromiumSandbox": false,
+      "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+    }
+  }
+}

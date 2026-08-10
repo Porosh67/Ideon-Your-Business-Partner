@@ -1,0 +1,391 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  /* ── Typography ── */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-heading: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  /* ── Core palette (refined, more premium) ── */
+  --color-primary: oklch(0.55 0.22 262.88);
+  --color-primary-hover: oklch(0.5 0.24 262.88);
+  --color-primary-subtle: oklch(0.6 0.22 262.88 / 0.15);
+  --color-on-primary: oklch(1 0 0);
+
+  --color-secondary: oklch(0.65 0.18 259.81);
+  /* Accent darkened for WCAG: white text on accent ≈ 4.9:1, accent text on
+     light surfaces ≈ 4.6:1 (both pass 4.5:1 AA). */
+  --color-accent: oklch(0.57 0.2 41.12);
+  --color-accent-hover: oklch(0.54 0.21 41.12);
+  --color-accent-subtle: oklch(0.57 0.2 41.12 / 0.15);
+
+  /* Dark theme surfaces */
+  --color-background: oklch(0.105 0.008 260.03);
+  --color-surface: oklch(0.145 0.01 260.03);
+  --color-surface-hover: oklch(0.18 0.012 260.03);
+  --color-surface-elevated: oklch(0.17 0.012 260.03);
+  --color-foreground: oklch(0.96 0.008 260.03);
+  --color-muted: oklch(0.65 0.02 260.03);
+  --color-subtle: oklch(0.22 0.015 260.03);
+  --color-border: oklch(0.22 0.015 260.03);
+  --color-border-hover: oklch(0.3 0.02 260.03);
+
+  --color-destructive: oklch(0.6 0.22 27.33);
+  --color-destructive-subtle: oklch(0.6 0.22 27.33 / 0.15);
+  --color-ring: oklch(0.55 0.22 262.88);
+  --color-success: oklch(0.62 0.2 145);
+  --color-success-subtle: oklch(0.62 0.2 145 / 0.15);
+  --color-warning: oklch(0.72 0.18 85);
+
+  /* ── Border radius ── */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+
+  /* ── Shadows ── */
+  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.2);
+  --shadow-card-hover: 0 4px 12px -2px rgb(0 0 0 / 0.4);
+  --shadow-elevated: 0 8px 24px -4px rgb(0 0 0 / 0.5);
+  --shadow-glow-primary: 0 0 20px -4px oklch(0.55 0.22 262.88 / 0.3);
+  --shadow-glow-accent: 0 0 20px -4px oklch(0.57 0.2 41.12 / 0.25);
+
+  /* ── Animations ── */
+  --animate-spin: spin 1s linear infinite;
+  --animate-pulse-soft: pulse-soft 2s ease-in-out infinite;
+  --animate-fade-in: fade-in 0.4s ease-out;
+  --animate-slide-up: slide-up 0.4s ease-out;
+  --animate-scale-in: scale-in 0.2s ease-out;
+  --animate-glow-pulse: glow-pulse 3s ease-in-out infinite;
+  --animate-typing-dot: typing-dot 1.2s ease-in-out infinite;
+  --animate-shimmer: shimmer 2s linear infinite;
+  --animate-message-in: message-in 0.3s ease-out;
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes pulse-soft {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes slide-up {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes scale-in {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes glow-pulse {
+    0%, 100% { box-shadow: 0 0 20px -4px oklch(0.55 0.22 262.88 / 0.15); }
+    50% { box-shadow: 0 0 30px -4px oklch(0.55 0.22 262.88 / 0.3); }
+  }
+  @keyframes typing-dot {
+    0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+  }
+  @keyframes shimmer {
+    from { background-position: -200% 0; }
+    to { background-position: 200% 0; }
+  }
+  @keyframes message-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* ── Light theme overrides ── */
+[data-theme="light"] {
+  --color-background: oklch(0.985 0.002 260);
+  --color-surface: oklch(0.96 0.005 260);
+  --color-surface-hover: oklch(0.92 0.008 260);
+  --color-surface-elevated: oklch(0.97 0.005 260);
+  --color-foreground: oklch(0.15 0.01 260);
+  --color-muted: oklch(0.5 0.015 260);
+  --color-subtle: oklch(0.88 0.008 260);
+  --color-border: oklch(0.88 0.01 260);
+  --color-border-hover: oklch(0.78 0.015 260);
+  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+  --shadow-card-hover: 0 4px 12px -2px rgb(0 0 0 / 0.08);
+  --shadow-elevated: 0 8px 24px -4px rgb(0 0 0 / 0.1);
+  --shadow-glow-primary: 0 0 20px -4px oklch(0.55 0.22 262.88 / 0.2);
+  --shadow-glow-accent: 0 0 20px -4px oklch(0.57 0.2 41.12 / 0.15);
+}
+[data-theme="light"] body {
+  color-scheme: light;
+}
+
+/* ── Base styles ── */
+html, body {
+  min-height: 100vh;
+  width: 100%;
+  overflow-y: auto !important;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Focus styles for accessibility */
+*:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Seamless gradient text utility */
+.text-gradient {
+  background: linear-gradient(135deg, var(--color-foreground) 0%, var(--color-primary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-accent {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Soft background pattern for hero */
+.bg-grid-pattern {
+  background-image:
+    linear-gradient(var(--color-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
+  background-size: 60px 60px;
+  background-position: center center;
+  opacity: 0.3;
+}
+
+/* Glow ring for focused / active states */
+.ring-glow-primary {
+  box-shadow: 0 0 0 1px var(--color-primary), 0 0 16px -2px oklch(0.55 0.22 262.88 / 0.25);
+}
+
+.ring-glow-accent {
+  box-shadow: 0 0 0 1px var(--color-accent), 0 0 16px -2px oklch(0.57 0.2 41.12 / 0.25);
+}
+
+/* ── Branded "Ideon is thinking" loader ──
+   The logo box breathes with a soft glow; the spark gently pulses.
+   Respects prefers-reduced-motion. */
+.ideon-loader-box {
+  animation: ideon-loader-glow 2.4s ease-in-out infinite;
+}
+
+.ideon-loader-logo {
+  animation: ideon-loader-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes ideon-loader-glow {
+  0%, 100% {
+    box-shadow: 0 0 18px -4px oklch(0.55 0.22 262.88 / 0.35);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 32px -2px oklch(0.55 0.22 262.88 / 0.55);
+    transform: scale(1.05);
+  }
+}
+
+@keyframes ideon-loader-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+  50% {
+    opacity: 0.75;
+    transform: scale(0.94) rotate(6deg);
+  }
+}
+
+/* ── Chat composer (Part B) ──
+   ONE consistent border at all times. On hover a soft halo appears; on
+   focus a crisp ring + soft glow — all box-shadows are painted on the SAME
+   element (so they always hug the box's exact edges and rounded corners)
+   and fade in/out via a box-shadow transition. No separate floating box,
+   no size mismatch. */
+.composer-box {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.25s ease, box-shadow 0.3s ease, background-color 0.25s ease;
+}
+
+.composer-box:hover {
+  border-color: color-mix(in oklab, var(--color-primary) 30%, var(--color-border));
+  box-shadow:
+    var(--shadow-card),
+    0 0 0 1px color-mix(in oklab, var(--color-primary) 20%, transparent),
+    0 0 18px -6px color-mix(in oklab, var(--color-primary) 28%, transparent);
+}
+
+.composer-box:focus-within {
+  border-color: color-mix(in oklab, var(--color-primary) 60%, var(--color-border));
+  box-shadow:
+    var(--shadow-card),
+    0 0 0 1px var(--color-primary),
+    0 0 0 4px color-mix(in oklab, var(--color-primary) 12%, transparent),
+    0 0 26px -4px color-mix(in oklab, var(--color-primary) 32%, transparent);
+}
+
+/* The composer box itself shows the focus state (ring + glow via
+   :focus-within), so the inner textarea must NOT paint its own browser
+   focus ring on top — that produced a misaligned second frame hugging the
+   textarea. This rule is unlayered, so it beats both Tailwind's layered
+   utilities and the global *:focus-visible ring. Setting the full shorthand
+   (style + width + color) so no residual outline-width/color can survive
+   from the global rule or browser defaults. */
+.composer-box textarea,
+.composer-box textarea:focus,
+.composer-box textarea:focus-visible {
+  outline: none;
+  outline-style: none;
+  outline-width: 0;
+  border-radius: inherit;
+}
+
+/* When attachments are present, the composer row connects to the attachment
+   area above — remove the top border so they read as one unit. Unlayered
+   with higher specificity than .composer-box so it wins the cascade. */
+.composer-box.composer-box-attached {
+  border-top: 0;
+}
+
+/* Auto-grow textarea: smooth height transition for the chat input. */
+.composer-box textarea {
+  transition: height 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-box,
+  .composer-box textarea {
+    transition: none;
+  }
+}
+
+/* Attached variant: the composer row sits below an attachment strip, so the
+   top border and top corners are removed to form one continuous box. */
+.composer-box.composer-box-attached {
+  border-top: none;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* ── Transition overlay ──
+   The full-screen branded cover fades IN on show and fades OUT on dismiss
+   (the wrapper keeps playing the exit animation after the overlay is removed
+   from the tree, so the page underneath is revealed as a gentle cross-fade —
+   never an abrupt cut). The main content also gets a subtle slide-up on mount
+   so the reveal never feels like a hard "drop-in". */
+.transition-overlay {
+  animation: transition-in 0.18s ease-out;
+}
+
+@keyframes transition-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.transition-out {
+  /* Opacity-only on a compositor layer: `will-change: opacity` promotes the
+     overlay to its own layer so the exit fade keeps rendering smoothly even
+     while the main thread is busy committing the destination's first render,
+     the history-store emission and the sidebar pop-in (all of which overlap
+     this fade — they must never starve it into an abrupt cut). 240ms matches
+     FADE_MS in useAuthTransition.ts. */
+  animation: transition-out 0.24s ease-in forwards;
+  will-change: opacity;
+}
+
+@keyframes transition-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* Page reveal: gentle rise + fade, with a clamp so long pages never jump */
+.page-enter {
+  animation: page-enter 0.35s ease-out both;
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Chat messages fade + slide in gently */
+.animate-message-in {
+  animation: message-in 0.3s ease-out;
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ideon-loader-box,
+  .ideon-loader-logo,
+  .animate-message-in,
+  .animate-fade-in,
+  .animate-slide-up,
+  .animate-scale-in,
+  .transition-overlay,
+  .transition-out,
+  .page-enter {
+    animation: none !important;
+  }
+}
