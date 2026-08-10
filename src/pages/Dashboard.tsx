@@ -1294,6 +1294,11 @@ export default function Dashboard() {
     if (!user) throw new Error('You signed out before Ideon could reply.');
     const userId = user.id;
 
+    // Optimistic id used for the in-memory bubble before the DB row exists.
+    // If the DB insert succeeds with a different id, we swap the temp id out
+    // so subsequent edits regenerate/delete operate on the real row id.
+    const tempMsgId = crypto.randomUUID();
+
     try {
       // 1) Combined classify + reply fast path (Part C).
       const combined = (await callEdgeFunction<ChatResult>('assistant-chat', {
@@ -1307,8 +1312,25 @@ export default function Dashboard() {
 
       let reply = '';
       if (combined.reply != null && combined.category !== 'A') {
-        // Inline reply — render immediately.
-        reply = combined.reply;
+        // Inline reply — render IMMEDIATELY (before any further await), so the
+        // bubble appears the moment the response lands. Optimistic — DB
+        // persistence below will swap to the real id. This is the canonical
+        // "render immediately" path; before this commit the optimistic render
+        // was gated behind the second DB await, which left the typing
+        // indicator up for tens of seconds whenever that second await stalled.
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: tempMsgId,
+            conversation_id: convId,
+            user_id: userId,
+            role: 'assistant',
+            content: combined.reply as string,
+            created_at: new Date().toISOString(),
+          },
+        ]);
+        setShowTyping(false);
+        reply = combined.reply as string;
       } else if (combined.category === 'A' && combined.idea_text) {
         // Full pipeline (research + plan).
         if (isCurrent()) setPipelineStage('research');
@@ -1341,6 +1363,20 @@ export default function Dashboard() {
             );
           }
         }
+        // Category A full-pipeline: render the friendlier "plan is ready"
+        // summary immediately. (hydrateWithDb later swaps in the real id.)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: tempMsgId,
+            conversation_id: convId,
+            user_id: userId,
+            role: 'assistant',
+            content: planRes.reply,
+            created_at: new Date().toISOString(),
+          },
+        ]);
+        setShowTyping(false);
         reply = planRes.reply;
       } else {
         // Combined couldn't answer inline — classic classify→reply path.
@@ -1356,13 +1392,29 @@ export default function Dashboard() {
           search_query: combined.search_query,
         })) as ChatReplyResult;
         if (!isCurrent()) return;
+        // Same optimistic-render pattern as the fast path so the bubble
+        // appears the moment the second edge call returns.
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: tempMsgId,
+            conversation_id: convId,
+            user_id: userId,
+            role: 'assistant',
+            content: replyRes.reply,
+            created_at: new Date().toISOString(),
+          },
+        ]);
+        setShowTyping(false);
         reply = replyRes.reply;
       }
 
       if (!isCurrent()) return;
 
-      // Persist + render the assistant message. For Regenerate, drop the old
-      // row first so the new version cleanly replaces it (no orphan content).
+      // Persist the assistant message (best-effort). For Regenerate, drop the
+      // old row first so the new version cleanly replaces it (no orphan
+      // content). The bubble is ALREADY on screen by this point — DB write is
+      // for sidebar/refresh correctness only.
       if (replaceAssistantMessageId) {
         await supabase
           .from('conversation_messages')
@@ -1371,49 +1423,37 @@ export default function Dashboard() {
           .eq('user_id', userId);
         if (!isCurrent()) return;
       }
-      const { data: inserted } = await supabase
-        .from('conversation_messages')
-        .insert({
-          conversation_id: convId,
-          user_id: userId,
-          role: 'assistant',
-          content: reply,
-        })
-        .select('id')
-        .single();
-      if (!isCurrent()) return;
-      setShowTyping(false);
-      setMessages((prev) => {
-        const updated = [...prev];
-        const newMsg: ConversationMessageRow = inserted
-          ? {
-              id: inserted.id,
-              conversation_id: convId,
-              user_id: userId,
-              role: 'assistant',
-              content: reply,
-              created_at: new Date().toISOString(),
+      try {
+        const { data: inserted } = await supabase
+          .from('conversation_messages')
+          .insert({
+            conversation_id: convId,
+            user_id: userId,
+            role: 'assistant',
+            content: reply,
+          })
+          .select('id')
+          .single();
+        // Swap the optimistic temp id for the real row id so subsequent
+        // Edit/Regenerate/Delete operate on the persisted message. The
+        // bubble stays visible — we just rewrite the React key.
+        if (inserted && (inserted as { id: string }).id !== tempMsgId) {
+          setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === tempMsgId);
+            if (idx >= 0) {
+              const updated = [...prev];
+              updated[idx] = { ...updated[idx], id: (inserted as { id: string }).id };
+              return updated;
             }
-          : {
-              id: crypto.randomUUID(),
-              conversation_id: convId,
-              user_id: userId,
-              role: 'assistant',
-              content: reply,
-              created_at: new Date().toISOString(),
-            };
-        if (replaceAssistantMessageId) {
-          const idx = updated.findIndex((m) => m.id === replaceAssistantMessageId);
-          if (idx >= 0) {
-            updated[idx] = newMsg;
-          } else {
-            updated.push(newMsg);
-          }
-        } else {
-          updated.push(newMsg);
+            return prev;
+          });
         }
-        return updated;
-      });
+      } catch {
+        // DB write failed — bubble is already on screen, no UX impact.
+        // Continue to refresh history so the sidebar reflects the new
+        // conversation's last-update time.
+      }
+      if (!isCurrent()) return;
       loadHistory(userId);
     } catch (err) {
       const errMsg =
@@ -1449,6 +1489,23 @@ export default function Dashboard() {
       }
     }
   }
+
+  // ── Sync active conv into the persistent chat store via a React effect so
+  // the snapshot never races the local activeConv state. Mutating the
+  // external chat store synchronously from `setActiveChat()` fires
+  // `useSyncExternalStore`'s subscriber BEFORE the matching `setActiveConv`
+  // `useState` commit lands, so the mount-restore effect can fire mid-send,
+  // bump sessionRef, and wipe the in-flight reply. Routing the sync through
+  // an effect guarantees both updates are observed in the same React commit.
+  useEffect(() => {
+    if (activeConv) {
+      if (chatStoreSnap.activeConv?.id !== activeConv.id) {
+        setActiveChat(activeConv);
+      }
+    } else if (chatStoreSnap.activeConv) {
+      clearActiveChat();
+    }
+  }, [activeConv, chatStoreSnap.activeConv]);
 
   // ── Confirm edit: persists the user's edited message, deletes every
   // subsequent message in the conversation, then re-runs the AI pipeline
@@ -1630,10 +1687,13 @@ export default function Dashboard() {
           conv = newConv as ConversationRow;
           if (isCurrent()) {
             setActiveConv(conv);
-            // Persist the freshly-created conversation's identity so a
-            // later navigation away & back to /dashboard can restore this
-            // very thread (not the empty welcome).
-            setActiveChat(conv);
+            // Don't call setActiveChat() inline here — the chat-store sync
+            // effect below owns that update. Calling setActiveChat before
+            // React commits the matching setActiveConv lets useSyncExternalStore
+            // notify the mount-restore effect with mismatched values (chat
+            // store non-null, local activeConv null), causing openConversation
+            // to fire mid-send, bump sessionRef, and drop the in-flight
+            // optimistic render.
           }
           addConversation(conv);
         }
