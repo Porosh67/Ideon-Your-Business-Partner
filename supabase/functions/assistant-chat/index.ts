@@ -355,6 +355,14 @@ async function handlePlan(
   }
 
   // ── Semantic memory: index the saved idea + conversation (best-effort) ──
+  // Start BOTH memory writes in parallel up front, then run them concurrently
+  // with the summary groqChat. Previously these were sequential `await`s that
+  // could each eat the full 30s `callPipeline` timeout — doubling the
+  // user-visible pipeline latency whenever semantic-memory was slow. By
+  // starting them now and awaiting AT THE END (same pattern as `handleReply`),
+  // total pipeline latency here is roughly max(summary, store ×2) instead of
+  // summary + store + store.
+  const memoryStorePromises: Promise<void>[] = [];
   if (ideaId) {
     const ideaContent = [
       `IDEA: ${ideaText}`,
@@ -370,17 +378,17 @@ async function handlePlan(
     ]
       .filter((s): s is string => Boolean(s && s.length > 3))
       .join('\n');
-    await storeMemory(token, { source_type: 'idea', source_id: ideaId, content: ideaContent });
+    memoryStorePromises.push(storeMemory(token, { source_type: 'idea', source_id: ideaId, content: ideaContent }));
   }
   if (conversationId) {
-    await storeMemory(token, {
+    memoryStorePromises.push(storeMemory(token, {
       source_type: 'conversation',
       source_id: conversationId,
       content: `CONVERSATION ABOUT: ${ideaText.slice(0, 300)}`,
-    });
+    }));
   }
 
-  // Friendly summary for the chat
+  // Friendly summary for the chat — runs concurrently with the memory writes.
   const summary = await groqChat(
     apiKey,
     [
@@ -404,6 +412,14 @@ async function handlePlan(
   );
 
   const replyWithPill = summary + '\n\n📊 Full business plan and market breakdown generated and saved to your Reports section.';
+
+  // Best-effort: ensure the saved-idea + conversation memory writes both
+  // actually complete before we return. storeMemory() has its own try/catch
+  // so these awaits never throw. Running them concurrently with the summary
+  // chat means total pipeline latency here is max(summary, store × 2)
+  // instead of summary + store + store.
+  await Promise.all(memoryStorePromises);
+
   return { phase: 'plan' as const, idea_id: ideaId, plan, roadmap, reply: replyWithPill, reality_check: realityResult.reality_check, competitor_snapshot: realityResult.competitor_snapshot };
 }
 
@@ -615,24 +631,44 @@ async function handleReply(
 
   // ── Uploaded-document context (step 5): follow-up questions that reference
   //    a previously uploaded document get the most relevant embedded chunks.
-  //    Always run (even without needs_memory) so "what did my document say…"
-  //    retrieves the right content via semantic similarity.
+  //    ONLY run for substantive messages — short greetings, small-talk, and
+  //    category-B idea requests can never plausibly reference an uploaded
+  //    document, and unconditionally embedding + vector-searching every
+  //    message was adding several seconds of latency (and wedging the cold
+  //    "Hi" reply when the embed call was slow on a cold function start).
+  //    "Hi" never asks about a doc.
+  //
+  //    For substantive messages we still want doc-grounded context when the
+  //    user is asking about their uploads — so we AWAIT the search result
+  //    with a tight 2-second ceiling. In the steady state the search
+  //    completes well under that window; the ceiling is just a safety net
+  //    so a wedged Gemini embed call still releases the chat reply fast.
+  const trimmed = message.trim();
+  const isShortGreeting =
+    /^(hi|hello|hey|yo|thanks|thank you|thx|ok|okay|sure|yes|no|great|good|who are you|what can you do|how are you|help)\b/i.test(trimmed);
+  const shouldSearchDocuments =
+    token != null && !isShortGreeting && trimmed.length >= 20;
+
+  // ── Parallel branch: (document search) || (2s safety ceiling). Resolves to
+  // the doc results OR null once either finishes. Skipped entirely for
+  // greetings, so the cold "Hi" reply path adds zero doc-search latency.
+  const documentResults: { content?: string; source_id?: string }[] | null =
+    !shouldSearchDocuments
+      ? null
+      : await Promise.race<{ content?: string; source_id?: string }[] | null>([
+          searchDocuments(token as string, message, 4).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), 2_000)),
+        ]);
+
   let documentBlock = '';
-  if (token) {
-    try {
-      const docResults = await searchDocuments(token, message, 4);
-      if (docResults && docResults.length > 0) {
-        documentBlock =
-          'RELEVANT EXCERPTS FROM DOCUMENTS THIS USER UPLOADED (semantic search results — ' +
-          'use these to answer questions about their uploaded files; if the user is asking ' +
-          'about a document, quote/reference the actual content below):\n' +
-          (docResults as { content?: string; source_id?: string }[])
-            .map((r, i) => `${i + 1}. ${r?.content ?? ''}`)
-            .join('\n\n');
-      }
-    } catch {
-      // document retrieval is best-effort
-    }
+  if (Array.isArray(documentResults) && documentResults.length > 0) {
+    documentBlock =
+      'RELEVANT EXCERPTS FROM DOCUMENTS THIS USER UPLOADED (semantic search results — ' +
+      'use these to answer questions about their uploaded files; if the user is asking ' +
+      'about a document, quote/reference the actual content below):\n' +
+      documentResults
+        .map((r, i) => `${i + 1}. ${r?.content ?? ''}`)
+        .join('\n\n');
   }
 
   // ── Store a conversation memory once the thread has started. Run in
