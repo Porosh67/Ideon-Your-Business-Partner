@@ -19,30 +19,50 @@ const email = `ideon-perftest-${Date.now()}@example.com`;
 const password = 'PerfTest!2025';
 console.log('Creating user', email);
 
-const supabaseAdmin = await import('https://esm.sh/@supabase/supabase-js@2');
-const admin = supabaseAdmin.createClient(SUPABASE_URL, ANON_KEY);
-
-// Sign-up flow returns "user_already_exists" if the email has been used;
-// switch to sign-in in that case so the test still works on reruns.
+// Sign-up
 let session;
-const { data: signupData, error: signupErr } = await admin.auth.signUp({
-  email,
-  password,
-  options: { data: { full_name: 'Perf Test', username: `perftest${Date.now()}` } },
+const signupRes = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', apikey: ANON_KEY },
+  body: JSON.stringify({
+    email,
+    password,
+    data: { full_name: 'Perf Test', username: `perftest${Date.now()}` },
+  }),
 });
-if (signupErr && !signupErr.message.includes('User already')) {
-  console.log('signup error:', signupErr.message);
-  process.exit(2);
-}
-if (signupData?.session) {
-  session = signupData.session;
+const signupText = await signupRes.text();
+let signupData;
+try { signupData = JSON.parse(signupText); } catch { signupData = null; }
+if (signupRes.ok && signupData?.access_token) {
+  session = {
+    access_token: signupData.access_token,
+    token_type: signupData.token_type ?? 'bearer',
+    expires_in: signupData.expires_in ?? 3600,
+    expires_at: signupData.expires_at ?? Math.floor(Date.now()/1000) + 3600,
+    refresh_token: signupData.refresh_token ?? 'fake-refresh',
+    user: signupData.user,
+  };
 } else {
-  const { data: signInData, error: signInErr } = await admin.auth.signInWithPassword({ email, password });
-  if (signInErr) {
-    console.log('sign-in error:', signInErr.message);
+  // User may already exist; fall back to sign-in.
+  const signinRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: ANON_KEY },
+    body: JSON.stringify({ email, password }),
+  });
+  const signinText = await signinRes.text();
+  if (!signinRes.ok) {
+    console.log('sign-in error:', signinText.slice(0, 500));
     process.exit(2);
   }
-  session = signInData.session;
+  const sj = JSON.parse(signinText);
+  session = {
+    access_token: sj.access_token,
+    token_type: sj.token_type ?? 'bearer',
+    expires_in: sj.expires_in ?? 3600,
+    expires_at: sj.expires_at ?? Math.floor(Date.now()/1000) + 3600,
+    refresh_token: sj.refresh_token ?? 'fake-refresh',
+    user: sj.user,
+  };
 }
 const userId = session.user.id;
 console.log('Signed in user', userId);
