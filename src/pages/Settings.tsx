@@ -370,18 +370,52 @@ function CreatePasswordModal({
 
     setSubmitting(true);
     try {
-      // Set the password on the current user. Standard Supabase Auth allows
-      // this for OAuth-only users as long as they have an active session.
-      const { error: updErr } = await supabase.auth.updateUser({ password: next });
-      if (updErr) throw updErr;
-      // Refresh the JWT so app_metadata.providers reflects the new 'email'
-      // identity everywhere (useAuth listener will pick this up and the
-      // "Don't have a password?" link will disappear from Settings).
-      await supabase.auth.refreshSession();
+      // FIRST password set on an OAuth / passwordless account.
+      //
+      // The Supabase project's auth config sets
+      // SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD = true, which
+      // rejects `auth.updateUser({ password })` from the browser unless the
+      // body also includes `current_password` — but a Google-only user has
+      // no current password to send, so the server returns "Current password
+      // required when setting new password." A plain `updateUser({ password,
+      // current_password: undefined })` doesn't help: faking a current_password
+      // would weaken security, and the field is required to actually match.
+      //
+      // We sidestep the check by routing through a tiny, JWT-gated edge
+      // function (`set-first-password`): it re-verifies the caller's session
+      // (proving they're the logged-in account owner) and writes the
+      // password via the admin API, which is exempt from the
+      // current_password check because it authenticates the request
+      // out-of-band. This pattern is identical to the existing
+      // `delete-account` function. After it succeeds, refresh the JWT so
+      // app_metadata / identities reflect the new email/password capability
+      // everywhere in the app.
+      await callEdgeFunction('set-first-password', { password: next });
+
+      // Tell the parent we are done — it closes the modal and surfaces a
+      // success message. The refresh below updates user state so the
+      // "Create a password" CTA is replaced by the standard Change Password
+      // form on next render.
+      try {
+        await supabase.auth.refreshSession();
+      } catch {
+        // The admin write itself succeeded; a transient refresh failure is
+        // not a hard failure for the user. The default page reload will
+        // pick up the new server state.
+      }
+      // getUser() forces a server fetch so the canonical identities list is
+      // available — `userHasPassword` reads from that to decide whether the
+      // regular Change Password form should replace the CTA.
+      await supabase.auth.getUser();
+
       onSuccess();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "We couldn't create your password — try again."
+        err instanceof Error
+          ? err.message.includes('Function returned')
+            ? "We couldn't create your password just now — please try again."
+            : err.message
+          : "We couldn't create your password — try again."
       );
     } finally {
       setSubmitting(false);
@@ -928,8 +962,16 @@ function ChangePassword() {
   // a "Create a password" path so they can later use the standard Change
   // Email / Change Password / Delete Account flows with that credential.
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  // Belt-and-braces: the server (admin.updateUserById) writes encrypted_password,
+  // but GoTrue's JWT may not auto-attach an 'email' identity on the same
+  // refresh — so userHasPassword(user) can still read `false` for a few
+  // seconds. We force `hasPassword=true` from the moment the modal succeeds
+  // so the standard form replaces the CTA in this session without waiting
+  // for the next JWT refresh. Resets on remount, which is fine: a hard reload
+  // picks up the canonical server state.
+  const [passwordSetThisSession, setPasswordSetThisSession] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const hasPassword = userHasPassword(user);
+  const hasPassword = userHasPassword(user) || passwordSetThisSession;
 
   const confirmError =
     confirm && next && confirm !== next ? "Passwords don't match — check both fields." : undefined;
@@ -1112,13 +1154,17 @@ function ChangePassword() {
           onClose={closeCreateModal}
           onSuccess={() => {
             setCreateModalOpen(false);
+            // Force hasPassword=true immediately so the standard Change
+            // Password form replaces the CTA without waiting for a JWT
+            // refresh that may not include a new 'email' identity yet.
+            setPasswordSetThisSession(true);
             setSuccess(
               'Your password has been set — you can now change your email or delete your account with it.'
             );
-            // The "Create a password" trigger is gone (refreshSession flipped
-            // hasPassword to true and the form view has replaced the CTA).
-            // Move focus to the first form field so keyboard users land
-            // somewhere actionable.
+            // The "Create a password" trigger is gone (hasPassword is now
+            // true and the form view has replaced the CTA). Move focus to
+            // the first form field so keyboard users land somewhere
+            // actionable.
             window.setTimeout(() => {
               const cpCurrent = document.getElementById('cp-current');
               if (cpCurrent instanceof HTMLInputElement) cpCurrent.focus();
