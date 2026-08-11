@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import type { User } from '@supabase/supabase-js';
 import { supabase, callEdgeFunction } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 import { useAuthTransition } from '@/hooks/useAuthTransition';
@@ -26,6 +27,7 @@ import {
   Sparkles,
   Trash2,
   UserRound,
+  X,
 } from 'lucide-react';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -262,6 +264,271 @@ async function verifyCurrentPassword(email: string | null | undefined, password:
     return { ok: false as const, error: error.message };
   }
   return { ok: true as const };
+}
+
+/**
+ * Returns true when the current account has an email+password identity. False
+ * for OAuth-only sign-ups (Google, GitHub, Apple, ...) — those users do not
+ * have a current password to enter in the Change Email / Change Password /
+ * Delete Account flows, so the Security section exposes a dedicated
+ * "Create a password" path for them.
+ *
+ * Three signals, checked in priority order:
+ *  1. user.identities[] is present when the user came from a server fetch
+ *     (e.g. getUser()); an 'email' identity means they can auth with a
+ *     password (sign-up OR set later via updateUser({ password })).
+ *  2. user.app_metadata.providers[] lists every linked identity provider on
+ *     JWT-only payloads; 'email' in the list ⇒ they have a password.
+ *  3. user.app_metadata.provider (single) — the original sign-up provider;
+ *     only true for legacy email/password accounts.
+ */
+function userHasPassword(user: User | null | undefined): boolean {
+  if (!user) return false;
+  const identities = (user as unknown as { identities?: Array<{ provider?: string }> }).identities;
+  if (Array.isArray(identities) && identities.length > 0) {
+    return identities.some((id) => id?.provider === 'email');
+  }
+  const providers = user.app_metadata?.providers as string[] | undefined;
+  if (Array.isArray(providers) && providers.length > 0) {
+    return providers.includes('email');
+  }
+  return user.app_metadata?.provider === 'email';
+}
+
+/**
+ * Two-step modal that lets a passwordless / OAuth-only user create a brand
+ * new password on their account without leaving the Settings page. Step 1
+ * confirms the recovery email; Step 2 sets + confirms the new password using
+ * the same rules as the existing ChangePassword form. On success the modal
+ * closes and refreshes the JWT so app_metadata reflects the new identity.
+ */
+function CreatePasswordModal({
+  initialEmail,
+  onClose,
+  onSuccess,
+}: {
+  initialEmail: string;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [step, setStep] = useState<'email' | 'password'>('email');
+  const [email, setEmail] = useState(initialEmail);
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  // Focus the first field on open, lock body scroll while open, ESC to close.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const t = window.setTimeout(() => emailRef.current?.focus(), 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(t);
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  const handleEmailContinue = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!email.trim()) {
+      setError('Confirm your email to continue.');
+      return;
+    }
+    if (!isValidEmail(email.trim())) {
+      setError("That email doesn't look right — double-check it.");
+      return;
+    }
+    setStep('password');
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!next) {
+      setError('Enter a new password.');
+      return;
+    }
+    if (next.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return;
+    }
+    if (next !== confirm) {
+      setError("Passwords don't match — check both fields.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      // Set the password on the current user. Standard Supabase Auth allows
+      // this for OAuth-only users as long as they have an active session.
+      const { error: updErr } = await supabase.auth.updateUser({ password: next });
+      if (updErr) throw updErr;
+      // Refresh the JWT so app_metadata.providers reflects the new 'email'
+      // identity everywhere (useAuth listener will pick this up and the
+      // "Don't have a password?" link will disappear from Settings).
+      await supabase.auth.refreshSession();
+      onSuccess();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "We couldn't create your password — try again."
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const liveConfirmError =
+    confirm && next && confirm !== next ? "Passwords don't match — check both fields." : undefined;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-4 backdrop-blur-sm sm:items-center animate-fade-in"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="create-pw-title"
+    >
+      <div
+        className="w-full max-w-md animate-scale-in rounded-2xl border border-border bg-surface p-6 shadow-elevated"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h3
+              id="create-pw-title"
+              className="font-heading text-base font-bold tracking-tight text-foreground"
+            >
+              {step === 'email' ? 'Create a password' : 'Set your new password'}
+            </h3>
+            <p className="mt-0.5 text-xs text-muted">
+              {step === 'email'
+                ? 'You signed in with a provider (e.g. Google), so there is no password on this account yet.'
+                : 'Pick something strong — at least 8 characters with letters, numbers, and a symbol.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-muted transition-all duration-200 hover:bg-surface-hover hover:text-foreground active:scale-90"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {step === 'email' ? (
+          <form onSubmit={handleEmailContinue} className="space-y-4" noValidate>
+            <Field
+              label="Confirm your email"
+              htmlFor="cp-create-email"
+              hint="We'll use this as the recovery address for your password."
+              error={error ?? undefined}
+            >
+              <div className="relative">
+                <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                <input
+                  ref={emailRef}
+                  id="cp-create-email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    setError(null);
+                  }}
+                  autoComplete="email"
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? 'cp-create-email-error' : undefined}
+                  className={`${inputClass(!!error)} py-2.5 pl-10`}
+                />
+              </div>
+            </Field>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="cursor-pointer rounded-xl px-4 py-2.5 text-sm font-semibold text-muted transition-all duration-150 hover:bg-surface-hover hover:text-foreground active:scale-[0.97]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-br from-primary to-secondary px-5 py-2.5 text-sm font-semibold text-on-primary shadow-md shadow-primary/20 transition-all duration-200 hover:shadow-lg hover:shadow-primary/30 active:scale-[0.97]"
+              >
+                Continue
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={handleSave} className="space-y-4" noValidate>
+            <Field label="New password" htmlFor="cp-create-next">
+              <PasswordInput
+                id="cp-create-next"
+                value={next}
+                onChange={(v) => {
+                  setNext(v);
+                  setError(null);
+                }}
+                autoComplete="new-password"
+              />
+              {next && <StrengthMeter password={next} />}
+            </Field>
+            <Field
+              label="Confirm new password"
+              htmlFor="cp-create-confirm"
+              error={liveConfirmError}
+            >
+              <PasswordInput
+                id="cp-create-confirm"
+                value={confirm}
+                onChange={(setConfirm)}
+                autoComplete="new-password"
+                ariaDescribedBy={liveConfirmError ? 'cp-create-confirm-error' : undefined}
+              />
+              {confirm && next && !liveConfirmError && next.length >= 8 && (
+                <p className="mt-1.5 flex items-center gap-1 text-xs text-success">
+                  <CheckCircle className="h-3 w-3" />
+                  Passwords match
+                </p>
+              )}
+            </Field>
+            {error && <Notice kind="error">{error}</Notice>}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setStep('email');
+                  setError(null);
+                }}
+                className="cursor-pointer rounded-xl px-4 py-2.5 text-sm font-semibold text-muted transition-all duration-150 hover:bg-surface-hover hover:text-foreground active:scale-[0.97]"
+              >
+                Back
+              </button>
+              <button
+                type="submit"
+                disabled={submitting}
+                className="flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-br from-primary to-secondary px-5 py-2.5 text-sm font-semibold text-on-primary shadow-md shadow-primary/20 transition-all duration-200 hover:shadow-lg hover:shadow-primary/30 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {submitting ? 'Saving…' : 'Save password'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -657,6 +924,12 @@ function ChangePassword() {
   }>({});
   const [success, setSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // For passwordless / OAuth-only users (Google, GitHub, Apple, ...), expose
+  // a "Create a password" path so they can later use the standard Change
+  // Email / Change Password / Delete Account flows with that credential.
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const hasPassword = userHasPassword(user);
 
   const confirmError =
     confirm && next && confirm !== next ? "Passwords don't match — check both fields." : undefined;
@@ -666,6 +939,13 @@ function ChangePassword() {
     setNext('');
     setConfirm('');
     setFieldErrors({});
+  };
+
+  const closeCreateModal = () => {
+    setCreateModalOpen(false);
+    // Return focus to the trigger so keyboard users land back on the
+    // element that opened the dialog (a11y).
+    window.setTimeout(() => triggerRef.current?.focus(), 0);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -723,6 +1003,20 @@ function ChangePassword() {
             autoComplete="current-password"
             ariaDescribedBy={fieldErrors.current ? 'cp-current-error' : undefined}
           />
+          {!hasPassword && (
+            <button
+              ref={triggerRef}
+              type="button"
+              onClick={() => {
+                setCreateModalOpen(true);
+                setError(null);
+                setSuccess(null);
+              }}
+              className="mt-2 inline-flex cursor-pointer items-center rounded text-xs font-medium text-primary transition-colors duration-150 hover:text-primary/80 hover:underline focus:outline-none focus-visible:underline focus-visible:ring-2 focus-visible:ring-primary/30"
+            >
+              Don't have a password? Create one
+            </button>
+          )}
         </Field>
 
         <Field label="New password" htmlFor="cp-next" error={fieldErrors.next}>
@@ -772,6 +1066,20 @@ function ChangePassword() {
           </button>
         </div>
       </form>
+
+      {createModalOpen && (
+        <CreatePasswordModal
+          initialEmail={user?.email ?? ''}
+          onClose={closeCreateModal}
+          onSuccess={() => {
+            setCreateModalOpen(false);
+            setSuccess(
+              'Your password has been set — you can now change your email or delete your account with it.'
+            );
+            window.setTimeout(() => triggerRef.current?.focus(), 0);
+          }}
+        />
+      )}
     </Card>
   );
 }
