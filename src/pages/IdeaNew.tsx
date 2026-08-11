@@ -118,13 +118,31 @@ export default function IdeaNew() {
 
     runningRef.current = true;
 
-    if (!user) {
+    // ── Effective user ID for the rest of the function ──
+    // The React state `user` is captured at the top of handleGenerate and
+    // cannot refresh after signInAnonymously — the auth listener re-renders
+    // the component, but the closure scope already froze the old (null) value.
+    // Reading `user.id` after sign-in therefore used null, so guest-originated
+    // plans inserted with `user_id: null` and silently failed; the Reports
+    // section (which queries by user_id) appeared empty after a refresh.
+    // Re-resolve the live user from the Supabase client right before signing
+    // in, and after the 500ms hydration pause, to get the truth.
+    let effectiveUser = user;
+    if (!effectiveUser) {
       const { error: anonError } = await supabase.auth.signInAnonymously();
       if (anonError) {
         setError('Could not start a session. Please try again or sign in.');
+        runningRef.current = false;
         return;
       }
       await new Promise((r) => setTimeout(r, 500));
+      const { data: { user: anonUser } } = await supabase.auth.getUser();
+      if (!anonUser) {
+        setError('Could not start a session. Please try again or sign in.');
+        runningRef.current = false;
+        return;
+      }
+      effectiveUser = anonUser;
     }
 
     let research: unknown = null;
@@ -174,11 +192,11 @@ export default function IdeaNew() {
       return;
     }
 
-    if (user && !isGuest && plan) {
+    if (effectiveUser && !isGuest && plan) {
       try {
         const { data: ideaRow } = await supabase
           .from('business_ideas')
-          .insert({ user_id: user.id, idea_text: trimmed })
+          .insert({ user_id: effectiveUser.id, idea_text: trimmed })
           .select('id')
           .single();
 
@@ -186,7 +204,7 @@ export default function IdeaNew() {
           // Push the new idea into the shared store so the sidebar updates instantly.
           upsertIdea({
             id: ideaRow.id,
-            user_id: user.id,
+            user_id: effectiveUser.id,
             idea_text: trimmed,
             title: null,
             is_pinned: false,
@@ -197,12 +215,22 @@ export default function IdeaNew() {
             .from('business_plans')
             .insert({
               idea_id: ideaRow.id,
-              user_id: user.id,
+              user_id: effectiveUser.id,
               target_customer: plan.target_customer,
               cost_estimate: plan.cost_estimate,
               competitor_summary: plan.competitor_summary,
               first_steps: plan.first_steps,
               raw_research_data: research,
+              // Persist the same minimal shape Dashboard's pipeline writes so
+              // /reports/:plan_id renders identically for plans generated
+              // here and plans generated from the Dashboard chat. Premium
+              // fields (reality_check / competitor_snapshot) stay null for
+              // now — IdeaNew doesn't run the assistant-chat plan phase that
+              // produces them, so the report-detail UI just hides the
+              // premium panels for these saves. Persistence shape and route
+              // match the Dashboard path.
+              reality_check: null,
+              competitor_snapshot: null,
             })
             .select('id')
             .single();
@@ -210,7 +238,7 @@ export default function IdeaNew() {
           if (planRow && roadmap) {
             await supabase.from('generated_roadmaps').insert({
               plan_id: planRow.id,
-              user_id: user.id,
+              user_id: effectiveUser.id,
               skills_to_learn: roadmap.skills_to_learn,
               checklist_30_days: roadmap.checklist_30_days,
               skill_gap_summary: roadmap.skill_gap_summary,
@@ -218,11 +246,26 @@ export default function IdeaNew() {
           }
 
           runningRef.current = false;
-          navigate(`/ideas/${ideaRow.id}`);
+          // Route to /reports/:plan_id so the Reports section uses the
+          // SAME render path as a Dashboard-generated plan. Previously
+          // /ideas/:idea_id routed to IdeaView, while Reports cards link to
+          // /reports/:plan_id — that meant the same persisted row rendered
+          // differently depending on how it was created, and `/reports`
+          // wouldn't show the new card without a refresh.
+          if (planRow) {
+            navigate(`/reports/${(planRow as { id: string }).id}`, { replace: true });
+          } else {
+            navigate('/reports');
+          }
           return;
         }
-      } catch {
-        // If DB save fails, still show results in guest mode
+      } catch (saveErr) {
+        // Don't silently drop the user's results on a transient save
+        // failure — surface it inline so they can retry.
+        const msg = saveErr instanceof Error ? saveErr.message : 'Could not save your plan.';
+        setError(msg);
+        runningRef.current = false;
+        return;
       }
     }
 

@@ -94,12 +94,48 @@ async function fetchAll(userId: string, attempt = 1): Promise<HistoryState> {
     await new Promise((r) => setTimeout(r, 1200));
     results = await run();
   }
+  // Defensive uniqueness — each row's primary key is unique in the schema, but
+  // mutations from concurrent tabs, future views with parent_share_id joins,
+  // or partially-applied optimistic inserts can still surface a single
+  // conversation/check-in/idea id twice in the same response. The sidebar
+  // uses the row id as its React key, so a duplicate would corrupt the list
+  // (two history rows appearing under one chat) — normalize to "latest per
+  // id wins" before storing the snapshot.
+  const conversations = dedupRows(
+    (results[0].data ?? []) as ConversationRow[],
+    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+  );
+  const checkins = dedupRows(
+    (results[1].data ?? []) as CheckinRow[],
+    (a, b) => new Date(b.checkin_date).getTime() - new Date(a.checkin_date).getTime()
+  );
+  const ideas = dedupRows(
+    (results[2].data ?? []) as BusinessIdeaRow[],
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
   return {
-    conversations: (results[0].data ?? []) as ConversationRow[],
-    checkins: (results[1].data ?? []) as CheckinRow[],
-    ideas: (results[2].data ?? []) as BusinessIdeaRow[],
+    conversations,
+    checkins,
+    ideas,
     loaded: true,
   };
+}
+
+/** Reduce an array of rows to at-most-one row per `id`, keeping the higher-
+ *  scoring entry (per the supplied comparator). Stable input order is
+ *  preserved for non-duplicate ids. */
+function dedupRows<T extends { id: string }>(
+  rows: T[],
+  prefer: (a: T, b: T) => number
+): T[] {
+  const seen = new Map<string, T>();
+  for (const row of rows) {
+    const existing = seen.get(row.id);
+    if (!existing || prefer(row, existing) < 0) {
+      seen.set(row.id, row);
+    }
+  }
+  return Array.from(seen.values());
 }
 
 /** Fetch all three lists and cache them (concurrent calls share one request). */

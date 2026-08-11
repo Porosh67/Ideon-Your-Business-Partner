@@ -166,9 +166,10 @@ export function ChatMessageRow({
           onCancel={() => controls?.onEditCancel?.()}
         />
       ) : (
-        // Inner row — spec: flex items-center justify-end/start gap-2.5 max-w-3xl mx-auto w-full.
-        // `justify-end` keeps the bubble + avatar glued to the right side for user
-        // messages; `justify-start` mirrors that for assistant messages.
+        // Inner row — flex items-center justify-end (user) / justify-start (AI),
+        // gap-2.5 max-w-3xl mx-auto w-full. The bubble + avatar are kept on the
+        // same horizontal axis so user bubbles sit on the right and AI bubbles
+        // on the left, mirroring standard AI chat apps.
         <div
           className={`flex w-full items-center gap-2.5 ${
             isUser ? 'justify-end' : 'justify-start'
@@ -179,111 +180,32 @@ export function ChatMessageRow({
               <LogoMark className="h-3.5 w-3.5" />
             </span>
           )}
-          {/* Spec: max-w-[75%] rounded-2xl px-4 py-2.5 text-sm bg-[#c43200] text-white shadow-sm */}
+          {/* max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm. AI bubbles
+              are larger (max-w-[85%]) and use plain foreground text; user
+              bubbles are tighter (max-w-[75%]) and use the accent fill. */}
           <div
-            className={`relative min-w-0 whitespace-pre-wrap break-words rounded-2xl text-sm leading-relaxed shadow-sm ${
+            className={`min-w-0 whitespace-pre-wrap break-words rounded-2xl text-sm leading-relaxed shadow-sm ${
               isUser
                 ? 'max-w-[75%] bg-[#c43200] px-4 py-2.5 text-white'
                 : 'max-w-[85%] px-4 py-2.5 text-foreground'
             }`}
           >
             {content ?? children}
-            {/* ── Hover action bar — absolutely positioned just above THIS
-                bubble's right edge so it hugs the message it belongs to
-                (not the chat wrapper, not the page). */}
-            {hasControls && !isEditing && (
-              <div
-                className="absolute -top-8 right-0 flex gap-0.5 transition-opacity duration-150 opacity-0 group-hover/chatrow:opacity-100 focus-within:opacity-100"
-              >
-                {isUser ? (
-                  <>
-                    {controls?.onEdit && (
-                      <ActionBtn label="Edit message" onClick={controls.onEdit}>
-                        <Pencil className="h-3.5 w-3.5" />
-                      </ActionBtn>
-                    )}
-                    {controls?.onCopy && (
-                      <ActionBtn
-                        label={copyState === 'copied' ? 'Copied to clipboard' : 'Copy message'}
-                        onClick={controls.onCopy}
-                        active={copyState === 'copied'}
-                      >
-                        {copyState === 'copied' ? (
-                          <Check className="h-3.5 w-3.5 text-success" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )}
-                      </ActionBtn>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    {controls?.onRegenerate && (
-                      <ActionBtn
-                        label={controls.isProcessing ? 'Regenerating…' : 'Regenerate response'}
-                        onClick={controls.onRegenerate}
-                        disabled={controls.isProcessing}
-                        active={controls.isProcessing}
-                      >
-                        {controls.isProcessing ? (
-                          <LogoMark className="h-3.5 w-3.5 ideon-loader-logo" />
-                        ) : (
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        )}
-                      </ActionBtn>
-                    )}
-                    {controls?.onThumbsUp && (
-                      <ActionBtn
-                        label="Good response"
-                        onClick={controls.onThumbsUp}
-                        active={feedbackState === 'up'}
-                      >
-                        <ThumbsUp className="h-3.5 w-3.5" />
-                      </ActionBtn>
-                    )}
-                    {controls?.onThumbsDown && (
-                      <ActionBtn
-                        label="Bad response"
-                        onClick={controls.onThumbsDown}
-                        active={feedbackState === 'down'}
-                      >
-                        <ThumbsDown className="h-3.5 w-3.5" />
-                      </ActionBtn>
-                    )}
-                    {controls?.onCopy && (
-                      <ActionBtn
-                        label={copyState === 'copied' ? 'Copied to clipboard' : 'Copy message'}
-                        onClick={controls.onCopy}
-                        active={copyState === 'copied'}
-                      >
-                        {copyState === 'copied' ? (
-                          <Check className="h-3.5 w-3.5 text-success" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" />
-                        )}
-                      </ActionBtn>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
           </div>
           {isUser && (
-            // Spec avatar: w-7 h-7 rounded-full shrink-0 flex items-center
-            // justify-center bg-accent text-xs font-semibold
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold text-white">
               <UserIcon className="h-3.5 w-3.5" />
             </span>
           )}
-          {/* Spacer keeps the bubble at the same horizontal position as the
-              action bar (when present) — items-center centers the inner row
-              between the two spacers. */}
-          {!isUser && hasControls && !isEditing && <span className="flex-1" />}
-          {isUser && hasControls && !isEditing && <span className="flex-1" />}
         </div>
       )}
 
-      {/* ── Hover action bar — only when controls are present and not editing. */}
+      {/* ── Single hover action bar — exactly ONE row of icons per message,
+            pinned to the same horizontal side as the bubble (right for user,
+            left for AI). Hover or keyboard-focus reveals it; otherwise hidden.
+            Previously this control surface was rendered TWICE (once absolutely
+            above the bubble AND once below it) — the duplicate row produced
+            overlapping icons and broken spacing. Now collapsed to one row. */}
       {hasControls && !isEditing && (
         <div
           className={`mt-1 flex gap-0.5 transition-opacity duration-150 ${
@@ -1101,17 +1023,37 @@ export default function Dashboard() {
       const { id } = (e as CustomEvent<{ id: string }>).detail ?? {};
       if (!id) return;
       removeConversation(id);
-      setActiveConv((prev) => (prev?.id === id ? null : prev));
-      setMessages((prev) => (prev[0]?.conversation_id === id ? [] : prev));
-      // If the deleted conversation was the persisted active one, drop it
-      // from the chat store too — otherwise a navigation away & back would
-      // re-open someone else's deleted thread. Read the live snapshot so
-      // we don't need to re-register this listener on every store change.
-      if (getChatSnapshot().activeConvId === id) clearActiveChat();
+      // If the deleted row is the one the user is actually viewing, route
+      // through `newConversation()` — the canonical "reset chat to welcome"
+      // call also used by the sidebar's "New chat" pill and the `?new=1`
+      // deep-link. Earlier code only cleared `activeConv` + `messages`,
+      // which left `sendingRef.current=true`, the pipeline loader, and
+      // the typing indicator up when a delete happened mid-send, so
+      // `hasActiveChat` stayed true and the welcome state never reappeared.
+      // Funneling the reset through one helper keeps the bug surface tiny.
+      const wasActive = getChatSnapshot().activeConvId === id;
+      if (wasActive) {
+        newConversation();
+        // Clear the URL if it still references the now-deleted conversation
+        // — otherwise the URL deep-link handler would re-attempt to open
+        // the missing row on the next re-render (e.g. after a back-nav).
+        const search = searchParams.toString();
+        if (search.includes('conversation=')) {
+          setSearchParams({}, { replace: true });
+          lastHandledSearchRef.current = search;
+        }
+      } else {
+        // Defensive: drop local pointers if they happened to match the
+        // deleted row (covers a race where the chat-store sync effect
+        // hadn't landed yet, so the snapshot was null but local state
+        // still pointed at the deleted conv).
+        setActiveConv((prev) => (prev?.id === id ? null : prev));
+        setMessages((prev) => (prev[0]?.conversation_id === id ? [] : prev));
+      }
     };
     window.addEventListener('ideon:conversation-deleted', onDeleted);
     return () => window.removeEventListener('ideon:conversation-deleted', onDeleted);
-  }, []);
+  }, [newConversation, searchParams, setSearchParams]);
 
   // ── Attachment handlers (step 5) ──
   const handleAttachFiles = useCallback((files: File[] | FileList, kind: AttachmentKind) => {
