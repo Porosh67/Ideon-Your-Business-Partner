@@ -968,7 +968,21 @@ function ChangePassword() {
         setFieldErrors({ current: check.error });
         return;
       }
-      const { error: updErr } = await supabase.auth.updateUser({ password: next });
+      // The Supabase Auth server enforces
+      // GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD (the project
+      // default) — when the user already has a password, the request MUST
+      // include the current one or the server rejects with
+      // "Current password required when setting new password." We verified
+      // `current` above via signInWithPassword, but that proof only lives
+      // in our local state — we still have to forward it on the actual
+      // write. (The dedicated Create Password modal below omits this on
+      // purpose: passwordless / OAuth-only users are exempt server-side
+      // because user.HasPassword() is false, so a plain
+      // updateUser({ password }) succeeds for them.)
+      const { error: updErr } = await supabase.auth.updateUser({
+        password: next,
+        current_password: current,
+      });
       if (updErr) throw updErr;
       setSuccess('Your password has been updated. Use it the next time you sign in.');
       resetForm();
@@ -986,24 +1000,33 @@ function ChangePassword() {
           <KeyRound className="h-4 w-4" />
         </span>
         <div>
-          <h3 className="font-semibold">Change password</h3>
-          <p className="text-xs text-muted">Use at least 8 characters with a mix of letters, numbers, and symbols.</p>
+          <h3 className="font-semibold">{hasPassword ? 'Change password' : 'Create a password'}</h3>
+          <p className="text-xs text-muted">
+            {hasPassword
+              ? 'Use at least 8 characters with a mix of letters, numbers, and symbols.'
+              : "You signed in with a provider (e.g. Google), so this account doesn't have a password yet."}
+          </p>
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-        <Field label="Current password" htmlFor="cp-current" error={fieldErrors.current}>
-          <PasswordInput
-            id="cp-current"
-            value={current}
-            onChange={(v) => {
-              setCurrent(v);
-              setFieldErrors((p) => ({ ...p, current: undefined }));
-            }}
-            autoComplete="current-password"
-            ariaDescribedBy={fieldErrors.current ? 'cp-current-error' : undefined}
-          />
-          {!hasPassword && (
+      {!hasPassword ? (
+        // Passwordless / OAuth-only users (Google, GitHub, Apple, ...) get a
+        // single, dedicated "Create a password" path rather than the regular
+        // three-field form. Showing the form-with-current-password-field here
+        // would invite a Google user to fill it in and submit — the Supabase
+        // Auth server would reject it with "Current password required when
+        // setting new password." because the user has no password yet. (Even
+        // for users who already created a password via this same flow once
+        // before, the server still demands the current one to authorize any
+        // further password change.) Sending the form off-screen for this
+        // account type removes the wrong path from the UI.
+        <div className="space-y-4">
+          <Notice kind="info">
+            Create a password to enable email + password sign-in and to
+            authorize sensitive actions like Change email and Delete account.
+            After it's set you can change it again here at any time.
+          </Notice>
+          <div className="flex justify-end">
             <button
               ref={triggerRef}
               type="button"
@@ -1012,60 +1035,76 @@ function ChangePassword() {
                 setError(null);
                 setSuccess(null);
               }}
-              className="mt-2 inline-flex cursor-pointer items-center rounded text-xs font-medium text-primary transition-colors duration-150 hover:text-primary/80 hover:underline focus:outline-none focus-visible:underline focus-visible:ring-2 focus-visible:ring-primary/30"
+              className="flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-br from-primary to-secondary px-5 py-2.5 text-sm font-semibold text-on-primary shadow-md shadow-primary/20 transition-all duration-200 hover:shadow-lg hover:shadow-primary/30 active:scale-[0.97]"
             >
-              Don't have a password? Create one
+              <KeyRound className="h-4 w-4" />
+              Create a password
             </button>
-          )}
-        </Field>
-
-        <Field label="New password" htmlFor="cp-next" error={fieldErrors.next}>
-          <PasswordInput
-            id="cp-next"
-            value={next}
-            onChange={(v) => {
-              setNext(v);
-              setFieldErrors((p) => ({ ...p, next: undefined }));
-            }}
-            autoComplete="new-password"
-            ariaDescribedBy={fieldErrors.next ? 'cp-next-error' : undefined}
-          />
-          {next && <StrengthMeter password={next} />}
-        </Field>
-
-        <Field label="Confirm new password" htmlFor="cp-confirm" error={fieldErrors.confirm ?? confirmError}>
-          <PasswordInput
-            id="cp-confirm"
-            value={confirm}
-            onChange={(v) => {
-              setConfirm(v);
-              setFieldErrors((p) => ({ ...p, confirm: undefined }));
-            }}
-            autoComplete="new-password"
-            ariaDescribedBy={fieldErrors.confirm || confirmError ? 'cp-confirm-error' : undefined}
-          />
-          {confirm && next && !confirmError && next.length >= 8 && (
-            <p className="mt-1.5 flex items-center gap-1 text-xs text-success">
-              <CheckCircle className="h-3 w-3" />
-              Passwords match
-            </p>
-          )}
-        </Field>
-
-        {error && <Notice kind="error">{error}</Notice>}
-        {success && <Notice kind="success">{success}</Notice>}
-
-        <div className="flex justify-end">
-          <button
-            type="submit"
-            disabled={submitting}
-            className="flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-br from-primary to-secondary px-5 py-2.5 text-sm font-semibold text-on-primary shadow-md shadow-primary/20 transition-all duration-200 hover:shadow-lg hover:shadow-primary/30 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {submitting ? 'Updating…' : 'Update password'}
-          </button>
+          </div>
         </div>
-      </form>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+          <Field label="Current password" htmlFor="cp-current" error={fieldErrors.current}>
+            <PasswordInput
+              id="cp-current"
+              value={current}
+              onChange={(v) => {
+                setCurrent(v);
+                setFieldErrors((p) => ({ ...p, current: undefined }));
+              }}
+              autoComplete="current-password"
+              ariaDescribedBy={fieldErrors.current ? 'cp-current-error' : undefined}
+            />
+          </Field>
+
+          <Field label="New password" htmlFor="cp-next" error={fieldErrors.next}>
+            <PasswordInput
+              id="cp-next"
+              value={next}
+              onChange={(v) => {
+                setNext(v);
+                setFieldErrors((p) => ({ ...p, next: undefined }));
+              }}
+              autoComplete="new-password"
+              ariaDescribedBy={fieldErrors.next ? 'cp-next-error' : undefined}
+            />
+            {next && <StrengthMeter password={next} />}
+          </Field>
+
+          <Field label="Confirm new password" htmlFor="cp-confirm" error={fieldErrors.confirm ?? confirmError}>
+            <PasswordInput
+              id="cp-confirm"
+              value={confirm}
+              onChange={(v) => {
+                setConfirm(v);
+                setFieldErrors((p) => ({ ...p, confirm: undefined }));
+              }}
+              autoComplete="new-password"
+              ariaDescribedBy={fieldErrors.confirm || confirmError ? 'cp-confirm-error' : undefined}
+            />
+            {confirm && next && !confirmError && next.length >= 8 && (
+              <p className="mt-1.5 flex items-center gap-1 text-xs text-success">
+                <CheckCircle className="h-3 w-3" />
+                Passwords match
+              </p>
+            )}
+          </Field>
+
+          {error && <Notice kind="error">{error}</Notice>}
+          {success && <Notice kind="success">{success}</Notice>}
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={submitting}
+              className="flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-br from-primary to-secondary px-5 py-2.5 text-sm font-semibold text-on-primary shadow-md shadow-primary/20 transition-all duration-200 hover:shadow-lg hover:shadow-primary/30 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {submitting ? 'Updating…' : 'Update password'}
+            </button>
+          </div>
+        </form>
+      )}
 
       {createModalOpen && (
         <CreatePasswordModal
@@ -1076,7 +1115,15 @@ function ChangePassword() {
             setSuccess(
               'Your password has been set — you can now change your email or delete your account with it.'
             );
-            window.setTimeout(() => triggerRef.current?.focus(), 0);
+            // The "Create a password" trigger is gone (refreshSession flipped
+            // hasPassword to true and the form view has replaced the CTA).
+            // Move focus to the first form field so keyboard users land
+            // somewhere actionable.
+            window.setTimeout(() => {
+              const cpCurrent = document.getElementById('cp-current');
+              if (cpCurrent instanceof HTMLInputElement) cpCurrent.focus();
+              else triggerRef.current?.focus();
+            }, 0);
           }}
         />
       )}
