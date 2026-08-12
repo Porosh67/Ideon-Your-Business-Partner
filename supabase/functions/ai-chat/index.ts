@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { friendlyEdgeError } from '../_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -94,6 +95,9 @@ Deno.serve(async (req: Request) => {
         max_tokens: 1500,
         messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
       }),
+      // 25s ceiling — covers the llama-3.3-70b full 1500-token reply; without
+      // an explicit timeout a stalled TCP read surfaces `Deno.errors.ReadTimeout`.
+      signal: AbortSignal.timeout(25_000),
     });
 
     if (!res.ok) {
@@ -107,7 +111,7 @@ Deno.serve(async (req: Request) => {
 
     return json({ reply });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Unexpected error';
-    return json({ error: msg }, 500);
+    console.error('ai-chat error:', err instanceof Error ? err.message : err);
+    return json({ error: friendlyEdgeError(err) }, 500);
   }
 });

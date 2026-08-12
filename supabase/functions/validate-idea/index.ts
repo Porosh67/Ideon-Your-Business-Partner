@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { friendlyEdgeError } from '../_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -62,7 +63,7 @@ function isGroqQuotaError(err: unknown): boolean {
   return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
 }
 
-async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<Response> {
+async function groqCall(apiKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
   return await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -70,6 +71,10 @@ async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    // 25s default ceiling — well above the YES/NO classifier's normal ~1-3s
+    // response but well below the Edge 60s hard kill. Without an explicit
+    // timeout a stalled TCP read surfaces `Deno.errors.ReadTimeout`.
+    signal: signal ?? AbortSignal.timeout(25_000),
   });
 }
 
@@ -171,7 +176,7 @@ Deno.serve(async (req: Request) => {
         : 'That doesn\'t seem to be a business idea. Could you describe a product or service you\'d like to start — what it offers, who it helps, and how it creates value?',
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unexpected error';
-    return json({ error: message }, 500);
+    console.error('validate-idea error:', err instanceof Error ? err.message : err);
+    return json({ error: friendlyEdgeError(err) }, 500);
   }
 });

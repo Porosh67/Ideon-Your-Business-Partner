@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { friendlyEdgeError } from '../_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -56,6 +57,11 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
         { role: 'user', content: userPrompt },
       ],
     }),
+    // 30s ceiling — long JSON generation on a slow model can hit Groq's
+    // mid-stream stall window; without an explicit timeout a stalled TCP
+    // read surfaces `Deno.errors.ReadTimeout` (the "Error: ReadTimeout:"
+    // surfaced to the user previously).
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!res.ok) {
@@ -128,7 +134,7 @@ Deno.serve(async (req: Request) => {
 
     return json({ ...normalized, idea_text: ideaText, generated_at: new Date().toISOString() });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unexpected error';
-    return json({ error: message }, 500);
+    console.error('generate-plan error:', err instanceof Error ? err.message : err);
+    return json({ error: friendlyEdgeError(err) }, 500);
   }
 });

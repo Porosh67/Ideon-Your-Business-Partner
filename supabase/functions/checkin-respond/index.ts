@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { friendlyEdgeError } from '../_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -61,7 +62,7 @@ function isGroqQuotaError(err: unknown): boolean {
   return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
 }
 
-async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<Response> {
+async function groqCall(apiKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
   return await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -69,6 +70,11 @@ async function groqCall(apiKey: string, body: Record<string, unknown>): Promise<
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    // 20s default ceiling — check-in is a short, warm 2-4 sentence reply on
+    // a small prompt, so 70b normally finishes in 3-6s and never needs more
+    // than the safety net below. Without an explicit timeout a stalled TCP
+    // read surfaces `Deno.errors.ReadTimeout`.
+    signal: signal ?? AbortSignal.timeout(20_000),
   });
 }
 
@@ -169,7 +175,7 @@ Deno.serve(async (req: Request) => {
 
     return json({ reply });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unexpected error';
-    return json({ error: message }, 500);
+    console.error('checkin-respond error:', err instanceof Error ? err.message : err);
+    return json({ error: friendlyEdgeError(err) }, 500);
   }
 });

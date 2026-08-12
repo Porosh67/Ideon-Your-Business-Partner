@@ -133,15 +133,32 @@ export async function callEdgeFunction<T = unknown>(
       const errMessage =
         (data as { error?: string } | null)?.error ??
         `Function returned ${res.status}`;
+      // Defense in depth: even when an Edge Function forgets to translate
+      // `Deno.errors.ReadTimeout`, the wire-body error string is sometimes
+      // literally "ReadTimeout" (the platform class name) with no message.
+      // Surface a polite retry hint instead so the user never reads a raw
+      // platform class name in chat.
+      if (typeof errMessage === 'string' && /^(?:ReadTimeout)$|^TimeoutError:?\s*$/.test(errMessage.trim())) {
+        throw new Error('Ideon took too long to respond. Please try again in a moment.');
+      }
       throw new Error(errMessage);
     }
 
     return data as T;
   } catch (err) {
-    // Translate the platform's AbortError into a clear, user-actionable
-    // message. The function did not respond in time — something on the
-    // edge stalled; the user can retry.
-    if (err instanceof DOMException && err.name === 'AbortError') {
+    // Translate the platform's AbortError / TimeoutError into a clear,
+    // user-actionable message. The function did not respond in time — something
+    // on the edge stalled; the user can retry. We match both names because
+    //   • AbortError    — raised when our own `controller.abort()` fires
+    //                     (above the per-call timeoutMs)
+    //   • TimeoutError  — raised by `AbortSignal.timeout()` inside an Edge
+    //                     Function whose Deno Deploy runtime enforced it.
+    //                     Supabase Edge Functions should already translate
+    //                     these to a clean message server-side, but we
+    //                     double-translate here so a non-patched function
+    //                     still reads as a polite retry hint, not a stack
+    //                     trace.
+    if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
       throw new Error(
         'Ideon took too long to respond. Please try again in a moment.'
       );

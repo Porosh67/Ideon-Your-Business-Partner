@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { friendlyEdgeError } from '../_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -52,8 +53,13 @@ function compactSnippet(value: unknown, maxLen = 2500): string {
  */
 async function getZoneDiagnostics(apiKey: string, zoneName = 'serp_api1') {
   try {
+    // 8s ceiling — this is a diagnostics probe (only runs on error), so a
+    // tighter cap keeps a wedged Bright Data auth check from eating the
+    // whole Edge runtime budget. Without an explicit timeout Deno Deploy's
+    // stalled-read window can surface `Deno.errors.ReadTimeout` here.
     const res = await fetch(`https://api.brightdata.com/zone?zone=${encodeURIComponent(zoneName)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8_000),
     });
     const text = await res.text();
     let parsed: unknown = null;
@@ -101,10 +107,16 @@ async function diagnoseBrightData(apiKey: string, query: string) {
   const out: Record<string, unknown>[] = [];
   for (const v of variants) {
     try {
+      // 8s per-variant ceiling — this battery only runs in the catch-block
+      // diagnostics path, and we WANT it to finish fast so the user-facing
+      // 500 doesn't stall behind a stuck Bright Data probe. Without this,
+      // Deno Deploy's stalled-read window can surface `Deno.errors.ReadTimeout`
+      // for each variant and bloat the diagnostic envelope.
       const res = await fetch('https://api.brightdata.com/request', {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(v.body),
+        signal: AbortSignal.timeout(8_000),
       });
       const text = await res.text();
       out.push({
@@ -121,12 +133,22 @@ async function diagnoseBrightData(apiKey: string, query: string) {
   return out;
 }
 
-/** Call the Bright Data SERP API for a single query. */
-async function serpSearch(apiKey: string, query: string) {
+/** Call the Bright Data SERP API for a single query.
+ *
+ *  Optional `signal` lets the caller share an AbortController — typically the
+ *  per-query ceiling — so an outer cancel cleanly aborts the inner fetch
+ *  instead of letting the request run to its 30s default and only THEN being
+ *  torn down by the caller. When no `signal` is passed, a 30s default ceiling
+ *  applies (matches `web-search`).
+ */
+async function serpSearch(apiKey: string, query: string, signal?: AbortSignal) {
   // Documented Bright Data SERP pattern: format=raw + brd_json=1 in the URL.
   // See: https://docs.brightdata.com/api-reference/serp/google-search/text-search
   const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&gl=us&brd_json=1`;
 
+  // Without an explicit per-fetch timeout Deno Deploy's stalled-read window
+  // can surface `Deno.errors.ReadTimeout` here (the "Error: ReadTimeout:"
+  // surfaced to the user previously).
   const res = await fetch('https://api.brightdata.com/request', {
     method: 'POST',
     headers: {
@@ -138,6 +160,7 @@ async function serpSearch(apiKey: string, query: string) {
       url,
       format: 'raw',
     }),
+    signal: signal ?? AbortSignal.timeout(30_000),
   });
 
   if (!res.ok) {
@@ -255,28 +278,37 @@ Deno.serve(async (req: Request) => {
       `${shortIdea} market trend`,
     ];
 
-    // Per-query ceiling so a stalled SERP can't pin the whole batch to its
-    // own 30s budget. 12s is well above Bright Data's normal 3-8s response
-    // but well below the assistant-chat harness timeout.
+    // Per-query ceiling so a stalled SERP can't pin the whole batch.
+    // 12s is well above Bright Data's normal 3-8s response but well below
+    // the assistant-chat harness timeout. The AbortController is shared
+    // with the inner fetch via `serpSearch`'s `signal` parameter, so an
+    // abort cleanly tears down the request — and the timer itself is
+    // `clearTimeout`'d in the `finally`, eliminating the unhandled-rejection
+    // path the previous `Promise.race(() => setTimeout(...))` produced when
+    // the fetch settled before the race timer fired.
     const PER_QUERY_TIMEOUT_MS = 12_000;
     const settled = await Promise.allSettled(
-      queries.map((q) =>
-        Promise.race<unknown>([
-          serpSearch(apiKey, q),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`SERP query "${q}" timed out after ${PER_QUERY_TIMEOUT_MS / 1000}s`)), PER_QUERY_TIMEOUT_MS)
-          ),
-        ]).catch((err) => {
+      queries.map(async (q) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), PER_QUERY_TIMEOUT_MS);
+        try {
+          return await serpSearch(apiKey, q, controller.signal);
+        } catch (err) {
           // Swallow into a typed failure so the plan generator can still read
           // a structured envelope (organic=[]) instead of nothing.
           return {
             query: q,
             search_engine: 'google',
             organic: [],
-            diagnostic: { error: err instanceof Error ? err.message : String(err) },
+            diagnostic: {
+              error: friendlyEdgeError(err),
+              raw_error: err instanceof Error ? err.message : String(err),
+            },
           };
-        })
-      )
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      })
     );
 
     const results = settled.map((s, i) => {
@@ -319,8 +351,8 @@ Deno.serve(async (req: Request) => {
       generated_at: new Date().toISOString(),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unexpected error';
-    console.error('research-market error:', message);
+    const message = friendlyEdgeError(err);
+    console.error('research-market error:', message, err instanceof Error ? err.message : err);
     // Attach Bright Data account/zone diagnostics + a request-variant battery so
     // failures are self-explanatory.
     const apiKey = Deno.env.get('BRIGHT_DATA_API_KEY');

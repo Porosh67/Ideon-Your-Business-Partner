@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { friendlyEdgeError } from '../_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -54,6 +55,10 @@ async function geminiJson(apiKey: string, prompt: string) {
         responseMimeType: 'application/json',
       },
     }),
+    // 40s ceiling — the 30-day roadmap is a long JSON payload (≈30 tasks +
+    // 10 skills + summary). Without an explicit timeout a stalled TCP read
+    // surfaces `Deno.errors.ReadTimeout` mid-stream.
+    signal: AbortSignal.timeout(40_000),
   });
 
   if (!res.ok) {
@@ -131,7 +136,7 @@ Deno.serve(async (req: Request) => {
 
     return json({ ...normalized, generated_at: new Date().toISOString() });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unexpected error';
-    return json({ error: message }, 500);
+    console.error('generate-roadmap error:', err instanceof Error ? err.message : err);
+    return json({ error: friendlyEdgeError(err) }, 500);
   }
 });
