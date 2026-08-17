@@ -40,9 +40,14 @@ export default defineConfig(() => ({
     },
   },
   server: {
+    // Resilience: when a previous Preview session left a stale Vite still
+    // bound to 5173, `strictPort: true` made the next start crash with
+    // "Port 5173 is already in use". Falling through to 5174/5175/... is
+    // safe because the platform's preview widget forwards whichever port
+    // Vite actually advertises. We still prefer 5173 when it's free.
     host: true,
     port: 5173,
-    strictPort: true,
+    strictPort: false,
     allowedHosts: true as const,
     hmr: false,
   },
