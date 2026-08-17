@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { safeParseJson, JsonParseError } from './_shared/json-extract.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -121,7 +122,13 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
       const data = await res.json();
       const content = data?.choices?.[0]?.message?.content;
       if (!content) throw new Error('Ollama returned an empty response');
-      return JSON.parse(content);
+      // Tolerant JSON parse — gemma4:31b-cloud and nemotron-3-nano:30b-cloud
+      // don't always honor `response_format: json_object` cleanly and may wrap
+      // the JSON in prose/fences (e.g. "Sure! Here's the JSON you asked for:
+      // ```json {...} ```"). safeParseJson strips the wrapping; JsonParseError
+      // escalates to the next model in the chain the same way 429 does so a
+      // misbehaving primary never strands the user with a hard 500.
+      return safeParseJson(content);
     } catch (err) {
       lastErr = err;
       if (isGroqQuotaError(err) && nextModelAfterQuota(model)) {
@@ -129,6 +136,14 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
         // the edge log when the fallback is engaged.
         console.warn(
           `[assistant-chat] ollama ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+        );
+        continue;
+      }
+      // Same escalation path for unusable JSON output — surface the model name
+      // in the log so we can correlate parse failures with specific models.
+      if (err instanceof JsonParseError && nextModelAfterQuota(model)) {
+        console.warn(
+          `[assistant-chat] ollama ${model} returned unparseable JSON; escalating to ${nextModelAfterQuota(model)}`
         );
         continue;
       }
