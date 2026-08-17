@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { friendlyEdgeError } from '../_shared/error-message.ts';
+import { friendlyEdgeError } from './_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
