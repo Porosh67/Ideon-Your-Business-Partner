@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { friendlyEdgeError } from '../_shared/error-message.ts';
+import { friendlyEdgeError } from './_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -39,41 +39,88 @@ async function verifyUser(req: Request) {
   return data.user ?? null;
 }
 
-/** Call Groq chat completions (OpenAI-compatible) and parse a JSON object out. */
-async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+// ─────────────────────────────────────────────────────────────
+// Groq fallback chain — the primary is the smartest free-tier model
+// (openai/gpt-oss-120b) but its TPM/RPM caps are tight. The fallback
+// (llama-3.3-70b-versatile) is more generous and produces equally
+// valid JSON. On a 429 we transparently escalate so the dashboard
+// pipeline keeps returning a plan instead of a raw 500. Non-429
+// errors still surface immediately — they are usually auth / wiring
+// or a genuine outage and retrying won't help.
+// ─────────────────────────────────────────────────────────────
+const GROQ_MODEL_PRIMARY = 'openai/gpt-oss-120b';
+const GROQ_MODEL_FALLBACK = 'llama-3.3-70b-versatile';
+const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
+
+function nextModelAfterQuota(currentModel: string): string | null {
+  const idx = MODEL_CHAIN.indexOf(currentModel as (typeof MODEL_CHAIN)[number]);
+  if (idx < 0 || idx === MODEL_CHAIN.length - 1) return null;
+  return MODEL_CHAIN[idx + 1] ?? null;
+}
+
+function isGroqQuotaError(err: unknown): boolean {
+  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+}
+
+async function groqCall(apiKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-120b',
-      temperature: 0.4,
-      max_tokens: 4096,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-    // 30s ceiling — long JSON generation on a slow model can hit Groq's
+    body: JSON.stringify(body),
+    // 30s default ceiling — long JSON generation on a slow model can hit Groq's
     // mid-stream stall window; without an explicit timeout a stalled TCP
     // read surfaces `Deno.errors.ReadTimeout` (the "Error: ReadTimeout:"
     // surfaced to the user previously).
-    signal: AbortSignal.timeout(30_000),
+    signal: signal ?? AbortSignal.timeout(30_000),
   });
+}
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+/**
+ * Groq chat completions with JSON output + 429-escalation. Returns
+ * the parsed JSON object the model produced. Throws on non-429 errors
+ * so the caller's catch can route to the safe-template plan envelope.
+ */
+async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string) {
+  let lastErr: unknown = null;
+  for (const model of MODEL_CHAIN) {
+    try {
+      const res = await groqCall(apiKey, {
+        model,
+        temperature: 0.4,
+        max_tokens: 4096,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        if (res.status === 429 && nextModelAfterQuota(model)) {
+          console.warn(
+            `[generate-plan] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+          );
+          continue;
+        }
+        throw err;
+      }
+      const data = await res.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Groq returned an empty response');
+      return JSON.parse(content);
+    } catch (err) {
+      lastErr = err;
+      if (isGroqQuotaError(err) && nextModelAfterQuota(model)) continue;
+      throw err;
+    }
   }
-
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Groq returned an empty response');
-
-  return JSON.parse(content);
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Groq request failed: all models exhausted quota');
 }
 
 Deno.serve(async (req: Request) => {
@@ -122,7 +169,32 @@ Deno.serve(async (req: Request) => {
       `LIVE MARKET RESEARCH (from web search):\n${researchSummary}\n\n` +
       'Generate the business plan JSON now.';
 
-    const plan = await groqJson(apiKey, systemPrompt, userPrompt);
+    // Wrapped in try/catch with a safe-template plan envelope so a stalled /
+    // quota-exhausted Groq call cannot strand the dashboard pipeline with a
+    // raw 500 — returns a minimal-valid plan the assistant-chat summary can
+    // still build a friendly reply around. The plan_id + roadmap stage still
+    // completes because all downstream stages tolerate a thin `first_steps`
+    // array, normalised here in the same shape the success path produces.
+    let plan: Record<string, unknown>;
+    try {
+      plan = await groqJson(apiKey, systemPrompt, userPrompt);
+    } catch (planErr) {
+      const why = planErr instanceof Error ? planErr.message : String(planErr);
+      console.warn(
+        `[generate-plan] groq chain failed (${why}); returning safe-template plan envelope`
+      );
+      return json({
+        target_customer: 'Analysis unavailable — try regenerating the plan in a few minutes.',
+        cost_estimate: 'Analysis unavailable — try regenerating the plan in a few minutes.',
+        competitor_summary: [],
+        first_steps: [
+          { title: 'Re-generate the plan', description: 'Tap "Regenerate" on the saved plan — my language model just had a temporary outage and should be back shortly.' },
+        ],
+        idea_text: ideaText,
+        partial: true,
+        generated_at: new Date().toISOString(),
+      });
+    }
 
     // Normalize + validate shape
     const normalized = {

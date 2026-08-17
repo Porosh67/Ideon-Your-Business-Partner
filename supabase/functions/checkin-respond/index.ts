@@ -151,7 +151,21 @@ Deno.serve(async (req: Request) => {
     const moodLabel = ['', 'Rough', 'Meh', 'Okay', 'Good', 'Great'][mood] ?? `level ${mood}`;
     const energyLabel = energy >= 4 ? 'high energy' : energy >= 3 ? 'moderate energy' : 'low energy';
 
+    // IDEON persona anchor — prepended so the model never loses its
+    // founder-coach identity even on the short-context check-in branch
+    // (where the smaller Nemotron fallback can otherwise drift toward
+    // generic "I'm here to help" fluff).
+    const IDEON_PERSONA =
+      'YOU ARE IDEON — a senior, sharp, grounded business-idea co-pilot. ' +
+      'You help founders and aspiring entrepreneurs turn rough ideas into ' +
+      'structured, market-researched plans. Voice: warm, specific, never ' +
+      'salesy, never repetitive. ' +
+      'Never reuse the same opening sentence you used in a previous turn. ' +
+      'Never pad with hedges like "Sure, I can help with that!" unless the ' +
+      'question really warrants it.';
+
     const system =
+      `${IDEON_PERSONA}\n\n` +
       'You are a friendly startup coach checking in with a founder. ' +
       'Give a SHORT, warm, genuinely useful response (2-4 sentences max) based on their daily check-in. ' +
       'Respond in first person as their coach. Use a warm, conversational tone. No JSON. No markdown.';
@@ -171,7 +185,26 @@ Deno.serve(async (req: Request) => {
         'but encouraging — relate to founder life and building momentum.';
     }
 
-    const reply = await groqChat(apiKey, system, prompt);
+    // Wrapped in try/catch with a warm, on-brand fallback that references
+    // the founder's actual mood/energy — so a stalled language provider
+    // never strands the user with a raw 500, and the fallback still feels
+    // like their coach responded (just without the fully custom reply).
+    let reply: string;
+    try {
+      reply = await groqChat(apiKey, system, prompt);
+    } catch (replyErr) {
+      const why = replyErr instanceof Error ? replyErr.message : String(replyErr);
+      console.warn(`[checkin-respond] groqChat failed (${why}); routing to safe-template reply`);
+      const lowEnergy = energy <= 2;
+      const lowMood = mood <= 2;
+      const label = lowMood
+        ? `Today's a tough one — be kind to yourself${lowEnergy ? ' and protect your energy' : ''}. One small step beats none.`
+        : lowEnergy
+          ? "Energy's a little low but you're still showing up — that's the whole game. Pick the single highest-leverage item from your plan for today."
+          : `Good ${lowMood ? 'but not great' : 'momentum'} — channel it${latestIdea ? ` into "${String(latestIdea).slice(0, 60)}"` : 'into the next concrete step on your plan'}.`;
+      const withIdea = latestIdea ? ` Tomorrow: spend 20 minutes on the first step of "${String(latestIdea).slice(0, 60)}".` : ' Tomorrow: pick one concrete task from your plan or, if you don\'t have one yet, drop me a short idea and I\'ll build you a 30-day roadmap for it.';
+      reply = `${label}${withIdea}`;
+    }
 
     return json({ reply });
   } catch (err) {

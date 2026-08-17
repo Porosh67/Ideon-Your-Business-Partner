@@ -159,7 +159,28 @@ Deno.serve(async (req: Request) => {
       '\n' +
       'Respond with EXACTLY one word: YES or NO. No punctuation, no explanation.';
 
-    const reply = await groqText(apiKey, system, ideaText);
+    // Wrapped in try/catch with a default-to-false fallback: if BOTH models
+    // in the chain fail (quota exhaustion on both, network outage, decode
+    // failure, etc.), we cannot get a reliable YES/NO answer. Defaulting to
+    // NO + the same friendly "describe your business" message keeps the
+    // Validate-Idea button useful — the user is asked for a clearer prompt
+    // instead of being shown a raw 500.
+    let reply: string;
+    try {
+      reply = await groqText(apiKey, system, ideaText);
+      // If the chain throws on its final call, the catch below takes over.
+      // (groqText is the one that currently rethrows after exhausting both models.)
+    } catch (classifyErr) {
+      const why = classifyErr instanceof Error ? classifyErr.message : String(classifyErr);
+      console.warn(
+        `[validate-idea] groqText failed after exhausting the model chain (${why}); defaulting to NOT a business idea with friendly re-prompt`
+      );
+      return json({
+        is_business_idea: false,
+        message:
+          "I couldn't reach my language model just now, so this isn't a confident answer. Could you expand your idea a bit — what the product or service does, who it helps, and how it creates value? A sentence or two is plenty.",
+      });
+    }
 
     // Tolerant parse: exact "YES"/"NO" first, then any message that contains
     // YES as a standalone word. The classifier prompt is explicit but the 8b

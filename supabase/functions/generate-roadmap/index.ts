@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { friendlyEdgeError } from '../_shared/error-message.ts';
+import { friendlyEdgeError } from './_shared/error-message.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -116,7 +116,27 @@ Deno.serve(async (req: Request) => {
       '}\n\n' +
       `BUSINESS PLAN:\n${planSummary}`;
 
-    const roadmap = await geminiJson(apiKey, prompt);
+    // Wrapped in try/catch with an empty-envelope fallback so a stalled /
+    // quota-exhausted Gemini call cannot strand the dashboard pipeline.
+    // The shape is exactly what the success path produces, just empty —
+    // so the downstream assistant-chat summary + persistence can still
+    // complete (and the user can always re-generate from the saved plan).
+    let roadmap: Record<string, unknown>;
+    try {
+      roadmap = await geminiJson(apiKey, prompt);
+    } catch (roadmapErr) {
+      const why = roadmapErr instanceof Error ? roadmapErr.message : String(roadmapErr);
+      console.warn(
+        `[generate-roadmap] gemini call failed (${why}); returning empty roadmap envelope`
+      );
+      return json({
+        skills_to_learn: [],
+        checklist_30_days: [],
+        skill_gap_summary: 'Roadmap generation is temporarily unavailable. Re-generate from the saved plan in a few minutes to populate skills and the 30-day checklist.',
+        partial: true,
+        generated_at: new Date().toISOString(),
+      });
+    }
 
     const normalized = {
       skills_to_learn: Array.isArray(roadmap.skills_to_learn)

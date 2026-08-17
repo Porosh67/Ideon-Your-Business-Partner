@@ -115,6 +115,24 @@ async function groqChatMessages(apiKey: string, messages: { role: string; conten
     : new Error('Ollama request failed: all models exhausted quota');
 }
 
+// ─────────────────────────────────────────────────────────────
+// IDEON persona anchor — prepended so the model never loses its
+// founder-coach identity even on the narrowed plan-context branch
+// (where the smaller Nemotron fallback can otherwise drift toward a
+// generic "you are an assistant" tone). Frozen in one place.
+// ─────────────────────────────────────────────────────────────
+const IDEON_PERSONA =
+  'YOU ARE IDEON — a senior, sharp, grounded business-idea co-pilot. ' +
+  'You help founders and aspiring entrepreneurs turn rough ideas into ' +
+  'structured, market-researched plans. Your specialties: live market ' +
+  'research, competitor snapshots, structured business plans, ' +
+  '30-day roadmaps with skills-to-learn, daily founder check-ins, and ' +
+  'entrepreneur brainstorming. Voice: warm, specific, never salesy, ' +
+  'never repetitive. ' +
+  'When the founder chats casually or drifts off-topic, gently steer ' +
+  'back toward business ideas without being dismissive — your job is to ' +
+  'make every conversation useful.';
+
 const SYSTEM_PROMPT =
   'You are an expert business advisor embedded inside "Ideon", a tool that helps ' +
   'founders turn ideas into actionable plans. A founder is asking questions about a specific ' +
@@ -122,6 +140,25 @@ const SYSTEM_PROMPT =
   'Use short paragraphs and bullet lists. If the answer is not in the plan context, give your ' +
   'best general advice but clearly label it as general guidance. Do not invent numbers as facts — ' +
   'use rough ranges and call them estimates.';
+
+/**
+ * Safe-template fallback when BOTH models in the chain fail. References
+ * the user's plan context (so the response isn't useless) without making
+ * up specifics — gives a structured steer-back with concrete next steps.
+ */
+function safeTemplateReply(message: string): string {
+  const trimmed = message.trim().slice(0, 160);
+  return [
+    "My language model is taking a quick break, so here's a practical fallback while I get back online:",
+    'If you have your saved plan open, the most useful moves right now are:',
+    '1) Review the first 3 steps in your plan and pick the one you can finish in the next 7 days — that\'s the only step that matters today.',
+    '2) Map your top 3 unanswered risks (the "first_steps" usually flag one). Write one short clarifying question per risk.',
+    '3) Talk to one real potential customer this week before doing anything else.',
+    trimmed
+      ? `When my language model is back, paste your follow-up ("${trimmed.replace(/"/g, '\\"')}") into the chat and I'll answer it grounded in your saved plan context.`
+      : "When my language model is back, send your follow-up question again and I'll answer it grounded in your saved plan context.",
+  ].join('\n\n');
+}
 
 Deno.serve(async (req: Request) => {
   // CORS preflight
@@ -153,8 +190,11 @@ Deno.serve(async (req: Request) => {
     const planContext = JSON.stringify(body?.plan_context ?? {}).slice(0, 8000);
     const history = Array.isArray(body?.history) ? (body.history as unknown[]).slice(-20) : [];
 
+    // Prepend IDEON_PERSONA so the model never loses its founder-coach
+    // identity, even when the smaller Nemotron fallback handles the reply.
+    const systemContent = `${IDEON_PERSONA}\n\n${SYSTEM_PROMPT}\n\nPLAN CONTEXT:\n${planContext}`;
     const messages = [
-      { role: 'system' as const, content: `${SYSTEM_PROMPT}\n\nPLAN CONTEXT:\n${planContext}` },
+      { role: 'system' as const, content: systemContent },
       ...history.map((m) => {
         const item = m as { role?: string; content?: string };
         return {
@@ -165,7 +205,18 @@ Deno.serve(async (req: Request) => {
       { role: 'user' as const, content: message },
     ];
 
-    const reply = await groqChatMessages(apiKey, messages);
+    // Wrapped in try/catch so a stalled/dead language provider cannot
+    // strand the user with a raw 500 — surface the on-brand safe
+    // template instead, consistent with assistant-chat / ai-chat /
+    // checkin-respond.
+    let reply: string;
+    try {
+      reply = await groqChatMessages(apiKey, messages);
+    } catch (replyErr) {
+      const why = replyErr instanceof Error ? replyErr.message : String(replyErr);
+      console.warn(`[plan-chat] ollama chain failed (${why}); routing to safe-template reply`);
+      reply = safeTemplateReply(message);
+    }
 
     return json({ reply });
   } catch (err) {
