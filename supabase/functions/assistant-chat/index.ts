@@ -672,6 +672,70 @@ async function handleRealityCheck(
 }
 
 // ─────────────────────────────────────────────────────────────
+// IDEON persona anchor — prepended to EVERY reply branch's system
+// prompt so the model never loses its identity, even on a narrowed
+// context branch (web/memory/docs/plan-context) where the historical
+// prompt can drift toward a generic "you are an assistant" vibe on
+// the smaller Nemotron fallback. Frozen at one place so any future
+// persona tweak happens here only.
+// ─────────────────────────────────────────────────────────────
+const IDEON_PERSONA =
+  'YOU ARE IDEON — a senior, sharp, grounded business-idea co-pilot. ' +
+  'You help founders and aspiring entrepreneurs turn rough ideas into ' +
+  'structured, market-researched plans. Your specialties: live market ' +
+  'research, competitor snapshots, structured business plans, ' +
+  '30-day roadmaps with skills-to-learn, daily founder check-ins, and ' +
+  'entrepreneur brainstorming. Voice: warm, specific, never salesy, ' +
+  'never repetitive. ' +
+  'When the founder chats casually or drifts off-topic, gently steer ' +
+  'back toward business ideas without being dismissive — your job is to ' +
+  'make every conversation useful. ' +
+  'Never reuse the same opening sentence you used in a previous turn. ' +
+  'Never pad with hedges like "Sure, I can help with that!" ' +
+  'unless the question really warrants it. ' +
+  'Build on prior turns — the user can see the whole conversation.';
+
+// ─────────────────────────────────────────────────────────────
+// Safe-template fallback reply.
+//
+// Wraps `groqChat` so that even when BOTH models in the fallback
+// chain fail (non-429 outage, network blip, decoding failure, quota
+// exhaustion on both), the chat still surfaces a coherent,
+// on-brand, context-aware message instead of bubbling up a raw
+// "Ollama request failed (503): …" / 500 to the user. This is the
+// reply-level equivalent of the wrap-with-template the plan pipeline
+// already does for stalled research / summary / roadmap sub-calls —
+// it guarantees the user's thread always lands with a usable
+// response, even when the language provider is unreachable.
+//
+// Two variants:
+//   • category B (idea suggestions) → a 3-step idea-scaffolding
+//     framework with a clear call-to-action
+//   • category C (general chat)      → warm steer-back to business
+//     topics, with no scolding, and a clear next step
+// ─────────────────────────────────────────────────────────────
+function safeTemplateReply(category: 'B' | 'C', message: string, hasContext: boolean): string {
+  const trimmed = message.trim().slice(0, 120);
+  if (category === 'B') {
+    return [
+      "I'm having trouble reaching my language model right now, so here's a quick idea-scaffolding framework I use with founders:",
+      "1) Pick one narrow audience (e.g. busy parents in one city, indie SaaS founders under 10K MRR, retirees who garden) — the narrower, the better your plan will be.",
+      "2) Pick one real friction that audience feels TODAY that they'd pay to remove.",
+      "3) Build the simplest product or service that solves JUST that friction. Validate it with five real conversations this week before writing a line of code.",
+      `When my language model is back, paste any of those into the chat and I'll run live market research, competitor analysis, and structure it into a real plan${
+        trimmed ? ` for "${trimmed}"` : ''
+      }.`,
+    ].join('\n\n');
+  }
+  return [
+    "My language model is taking a quick break, but I don't want to leave you hanging — I'm a founder coach first, so I can still help, just without a fully custom reply right now.",
+    hasContext
+      ? "Want me to dig back into your saved plan or brainstorm a related opportunity as soon as I'm back online?"
+      : "Tell me what kind of business you're curious about (the industry, the audience, or the problem you want to solve) and I'll run market research, draft a structured plan, and build a 30-day roadmap when I'm back.",
+  ].join('\n\n');
+}
+
+// ─────────────────────────────────────────────────────────────
 // Response-length intelligence (Part F).
 //
 // Rather than hard-coding one length, we judge the QUESTION and tell the
@@ -836,31 +900,42 @@ async function handleReply(
 
   // Category B always asks for 2-3 concrete ideas — pin BALANCED so the
   // length guidance never collapses the suggestion list.
-  const baseSystem = category === 'B'
-    ? 'You are the friendly assistant of Ideon, a business-idea app. Keep responses warm, structured and genuinely useful. No markdown, no bullets unless listing ideas.'
-    : documentBlock
-      ? 'You are Ideon, an AI business advisor. The founder uploaded documents and is asking about their content. ' +
-        'SEMANTIC-SEARCH EXCERPTS FROM THEIR UPLOADED DOCUMENTS are below. Answer their question by referencing the ' +
-        'ACTUAL content of those excerpts — quote figures, names, and details as they appear. If the excerpts do not ' +
-        'answer the question, say you could not find that in their uploaded documents and offer to help. ' +
-        'Conversational tone. No markdown headers.'
-      : contextBlock
-        ? 'You are an expert business analyst and startup advisor with access to the founder\'s FULL business plan and research (below). ' +
-          'Answer their question using that context — be specific and reference details from their plan. Offer practical advice. ' +
-          'If the answer is not in the context, say so rather than guessing. Conversational tone. No markdown headers.'
-        : webBlock
-          ? 'You are Ideon, an AI business advisor. The founder asked a question that needs CURRENT, real-time information. ' +
-            'You were given LIVE WEB SEARCH RESULTS below. Answer their question conversationally using ONLY those results — ' +
-            'do not invent facts, prices, or figures that are not in the results. Briefly attribute key claims to their sources ' +
-            '(e.g. "according to Reuters"). If the results do not answer the question, say so honestly and suggest a better search. ' +
-            'Warm and readable. No markdown headers.'
-          : memoryBlock
-            ? 'You are Ideon, an AI business advisor. The founder is referring to their PAST saved work (ideas, plans, or conversations). ' +
-              'Semantic search excerpts from their own data are below. If an excerpt matches what they are referring to, answer using it ' +
-              'and reference the details. If none match, say you could not find a past idea matching that description, and offer to help ' +
-              'them find it or start fresh. Conversational tone. No markdown headers.'
-            : 'You are the friendly assistant of Ideon, a business-idea app. Be warm, helpful and genuinely useful. No markdown, no bullets unless listing ideas. ' +
-              'If the message is not a business question, answer briefly, then gently steer back toward business ideas (e.g. "I\'m focused on helping you build business ideas — want to explore a concept instead?"). Never reject harshly — always offer a path forward.';
+  //
+  // We PREPEND `IDEON_PERSONA` to every branch so the model never loses
+  // its founder-coach identity, even on the narrowed-context branches
+  // (docs / web / memory / plan-context) where the smaller Nemotron
+  // fallback can otherwise drift toward generic "you are an assistant"
+  // phrasing. Without this anchor, the same greeting "Sure, I'd be
+  // happy to help with that!" repeats across every turn regardless of
+  // which specialization branch is active — one of the user's reported
+  // "repetitive generic" complaints.
+  const baseSystem =
+    `${IDEON_PERSONA}\n\n` +
+    (category === 'B'
+      ? 'You are the friendly assistant of Ideon, a business-idea app. Keep responses warm, structured and genuinely useful. No markdown, no bullets unless listing ideas.'
+      : documentBlock
+        ? 'You are Ideon, an AI business advisor. The founder uploaded documents and is asking about their content. ' +
+          'SEMANTIC-SEARCH EXCERPTS FROM THEIR UPLOADED DOCUMENTS are below. Answer their question by referencing the ' +
+          'ACTUAL content of those excerpts — quote figures, names, and details as they appear. If the excerpts do not ' +
+          'answer the question, say you could not find that in their uploaded documents and offer to help. ' +
+          'Conversational tone. No markdown headers.'
+        : contextBlock
+          ? 'You are an expert business analyst and startup advisor with access to the founder\'s FULL business plan and research (below). ' +
+            'Answer their question using that context — be specific and reference details from their plan. Offer practical advice. ' +
+            'If the answer is not in the context, say so rather than guessing. Conversational tone. No markdown headers.'
+          : webBlock
+            ? 'You are Ideon, an AI business advisor. The founder asked a question that needs CURRENT, real-time information. ' +
+              'You were given LIVE WEB SEARCH RESULTS below. Answer their question conversationally using ONLY those results — ' +
+              'do not invent facts, prices, or figures that are not in the results. Briefly attribute key claims to their sources ' +
+              '(e.g. "according to Reuters"). If the results do not answer the question, say so honestly and suggest a better search. ' +
+              'Warm and readable. No markdown headers.'
+            : memoryBlock
+              ? 'You are Ideon, an AI business advisor. The founder is referring to their PAST saved work (ideas, plans, or conversations). ' +
+                'Semantic search excerpts from their own data are below. If an excerpt matches what they are referring to, answer using it ' +
+                'and reference the details. If none match, say you could not find a past idea matching that description, and offer to help ' +
+                'them find it or start fresh. Conversational tone. No markdown headers.'
+              : 'You are the friendly assistant of Ideon, a business-idea app. Be warm, helpful and genuinely useful. No markdown, no bullets unless listing ideas. ' +
+                'If the message is not a business question, answer briefly, then gently steer back toward business ideas (e.g. "I\'m focused on helping you build business ideas — want to explore a concept instead?"). Never reject harshly — always offer a path forward.');
 
   const system = `${baseSystem}\n\n${lengthNote}`;
 
@@ -905,15 +980,38 @@ async function handleReply(
       `FOUNDER'S LATEST MESSAGE:\n${message}`;
   }
 
-  const reply = await groqChat(
-    apiKey,
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: userPrompt },
-    ],
-    needsWeb ? 1600 : 1100,
-    0.7
-  );
+  // ── Safe-template fallback at the reply call site. If BOTH models in the
+  // gemma4 → nemotron chain fail (network blip, quota exhaustion on both,
+  // decode failure, etc.), `groqChat` throws — we catch here and surface a
+  // coherent on-brand reply instead of bubbling up a raw 500 to the user.
+  // This complements the safe-template already present in `handlePlan`'s
+  // summary sub-pipeline and in `handleRealityCheck` — closing the same
+  // gap at the most user-visible call site (every greeting, follow-up, and
+  // casual message flows through here).
+  let reply: string;
+  try {
+    reply = await groqChat(
+      apiKey,
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: userPrompt },
+      ],
+      needsWeb ? 1600 : 1100,
+      0.7
+    );
+  } catch (replyErr) {
+    const why = replyErr instanceof Error ? replyErr.message : String(replyErr);
+    console.warn(
+      `[assistant-chat] groqChat failed for category ${category} (${why}); routing to safe-template reply`
+    );
+    // hasContext → does the message have ANY grounder (idea, docs, web,
+    // past memory, or saved plan). Lets us branch the fallback to the
+    // most useful next-step suggestion.
+    const hasContext = Boolean(
+      ideaId || documentBlock || webBlock || memoryBlock || contextBlock
+    );
+    reply = safeTemplateReply(category, message, hasContext);
+  }
 
   // Best-effort: ensure the conversation memory is actually persisted before
   // returning. storeMemory() has its own try/catch so this await never throws.

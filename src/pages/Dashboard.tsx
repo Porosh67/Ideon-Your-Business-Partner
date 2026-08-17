@@ -202,15 +202,21 @@ export function ChatMessageRow({
 
       {/* ── Single hover action bar — exactly ONE row of icons per message,
             pinned to the same horizontal side as the bubble (right for user,
-            left for AI). Hover or keyboard-focus reveals it; otherwise hidden.
-            Previously this control surface was rendered TWICE (once absolutely
-            above the bubble AND once below it) — the duplicate row produced
-            overlapping icons and broken spacing. Now collapsed to one row. */}
+            left for AI). Defaults to a dim but always-visible state so the
+            user can SEE the icons and know clicks registered (e.g. the
+            "copied" check, the selected thumbs-up fill) without having to
+            park their cursor on the bubble. Hover or keyboard-focus bumps
+            to full opacity for confident discoverability.
+            Previously the bar used `opacity-0` and only became visible on
+            hover, which masked active-state feedback (a clicked thumbs-up
+            would show for ~150ms then fade out as the cursor moved away,
+            reading as "the button didn't work"). Now baseline opacity-65
+            keeps the icons readable at all times. */}
       {hasControls && !isEditing && (
         <div
-          className={`mt-1 flex gap-0.5 transition-opacity duration-150 ${
+          className={`mt-1 flex gap-0.5 transition-opacity duration-200 ${
             isUser ? 'self-end' : 'self-start'
-          } opacity-0 group-hover/chatrow:opacity-100 focus-within:opacity-100`}
+          } opacity-65 group-hover/chatrow:opacity-100 focus-within:opacity-100`}
         >
           {isUser ? (
             <>
