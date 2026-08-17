@@ -70,9 +70,9 @@ Deno.serve(async (req: Request) => {
       return json({ error: 'messages is required (1-40 items)' }, 400);
     }
 
-    const apiKey = Deno.env.get('GROQ_API_KEY');
+    const apiKey = Deno.env.get('OLLAMA_API_KEY');
     if (!apiKey) {
-      return json({ error: 'GROQ_API_KEY is not configured' }, 500);
+      return json({ error: 'OLLAMA_API_KEY is not configured' }, 500);
     }
 
     const messages = rawMessages
@@ -83,31 +83,31 @@ Deno.serve(async (req: Request) => {
       })
       .filter((m) => m.content.trim().length > 0);
 
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const res = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'deepseek-v4-flash:cloud',
         temperature: 0.6,
         max_tokens: 1500,
         messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
       }),
-      // 25s ceiling — covers the llama-3.3-70b full 1500-token reply; without
+      // 25s ceiling — covers the deepseek-v4-flash full 1500-token reply; without
       // an explicit timeout a stalled TCP read surfaces `Deno.errors.ReadTimeout`.
       signal: AbortSignal.timeout(25_000),
     });
 
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+      throw new Error(`Ollama request failed (${res.status}): ${text.slice(0, 300)}`);
     }
 
     const data = await res.json();
     const reply = data?.choices?.[0]?.message?.content;
-    if (!reply) throw new Error('Groq returned an empty response');
+    if (!reply) throw new Error('Ollama returned an empty response');
 
     return json({ reply });
   } catch (err) {

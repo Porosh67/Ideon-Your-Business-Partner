@@ -43,18 +43,18 @@ function getToken(req: Request): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Groq helpers (llama-3.3-70b-versatile preferred, llama-3.1-8b-instant
-// fallback on 429). The 70b is the smartest model but has a 100k TPD (tokens-
-// per-day) quota on the free tier — the 8b is ~5x higher and is good enough
-// for ordinary chat replies. When the 70b's daily quota is exhausted the
-// free tier returns 429 ("Rate limit reached…"); rather than bubble that up
-// as a 500 to the user, transparently retry on the 8b so the chat keeps
+// Ollama Cloud helpers (deepseek-v4-flash:cloud preferred, nemotron-3-super:cloud
+// fallback on 429). The primary is the smartest model but has a lower TPD (tokens-
+// per-day) quota on the free tier — the fallback is more generous and is good
+// enough for ordinary chat replies. When the primary's daily quota is exhausted
+// the API returns 429 ("Rate limit reached…"); rather than bubble that up
+// as a 500 to the user, transparently retry on the fallback so the chat keeps
 // answering. Non-429 errors still surface immediately (they are usually
 // malformed-key or genuine outages, not quota).
 // ─────────────────────────────────────────────────────────────
-const GROQ_MODEL_PRIMARY = 'llama-3.3-70b-versatile';
-const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
-const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
+const OLLAMA_MODEL_PRIMARY = 'deepseek-v4-flash:cloud';
+const OLLAMA_MODEL_FALLBACK = 'nemotron-3-super:cloud';
+const MODEL_CHAIN = [OLLAMA_MODEL_PRIMARY, OLLAMA_MODEL_FALLBACK] as const;
 
 /**
  * Pick the next model after a 429. If we already used the fallback (8b)
@@ -69,12 +69,12 @@ function nextModelAfterQuota(currentModel: string): string | null {
 }
 
 /**
- * True when the thrown error is a Groq 429 quota exhaustion. We detect it
- * from the function's own error message ("Groq request failed (429): …")
+ * True when the thrown error is an Ollama 429 quota exhaustion. We detect it
+ * from the function's own error message ("Ollama request failed (429): …")
  * so the helper remains decoupled from the raw fetch URL.
  */
 function isGroqQuotaError(err: unknown): boolean {
-  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+  return err instanceof Error && /Ollama request failed \(429\)/.test(err.message);
 }
 
 async function groqCall(
@@ -82,7 +82,7 @@ async function groqCall(
   body: Record<string, unknown>,
   signal?: AbortSignal
 ): Promise<Response> {
-  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  return await fetch('https://ollama.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -114,13 +114,13 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
       );
       if (!res.ok) {
         const text = await res.text();
-        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        const err = new Error(`Ollama request failed (${res.status}): ${text.slice(0, 300)}`);
         if (res.status === 429 && nextModelAfterQuota(model)) continue;
         throw err;
       }
       const data = await res.json();
       const content = data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error('Groq returned an empty response');
+      if (!content) throw new Error('Ollama returned an empty response');
       return JSON.parse(content);
     } catch (err) {
       lastErr = err;
@@ -128,7 +128,7 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
         // Escalate to the next model in the chain. Logged so we can see in
         // the edge log when the fallback is engaged.
         console.warn(
-          `[assistant-chat] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+          `[assistant-chat] ollama ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
         );
         continue;
       }
@@ -138,7 +138,7 @@ async function groqJson(apiKey: string, systemPrompt: string, userPrompt: string
   // We exited the chain without returning — every model returned 429.
   throw lastErr instanceof Error
     ? lastErr
-    : new Error('Groq request failed: all models exhausted quota');
+    : new Error('Ollama request failed: all models exhausted quota');
 }
 
 async function groqChat(
@@ -163,19 +163,19 @@ async function groqChat(
       );
       if (!res.ok) {
         const text = await res.text();
-        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        const err = new Error(`Ollama request failed (${res.status}): ${text.slice(0, 300)}`);
         if (res.status === 429 && nextModelAfterQuota(model)) continue;
         throw err;
       }
       const data = await res.json();
       const content = data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error('Groq returned an empty response');
+      if (!content) throw new Error('Ollama returned an empty response');
       return content.trim();
     } catch (err) {
       lastErr = err;
       if (isGroqQuotaError(err) && nextModelAfterQuota(model)) {
         console.warn(
-          `[assistant-chat] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+          `[assistant-chat] ollama ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
         );
         continue;
       }
@@ -184,7 +184,7 @@ async function groqChat(
   }
   throw lastErr instanceof Error
     ? lastErr
-    : new Error('Groq request failed: all models exhausted quota');
+    : new Error('Ollama request failed: all models exhausted quota');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -991,9 +991,9 @@ Deno.serve(async (req: Request) => {
     const conversationId = body?.conversation_id ? (body.conversation_id as string) : undefined;
     const ideaId = body?.idea_id ? (body.idea_id as string) : undefined;
 
-    const apiKey = Deno.env.get('GROQ_API_KEY');
+    const apiKey = Deno.env.get('OLLAMA_API_KEY');
     if (!apiKey) {
-      return json({ error: 'GROQ_API_KEY is not configured' }, 500);
+      return json({ error: 'OLLAMA_API_KEY is not configured' }, 500);
     }
 
     // Only classify, reply and chat require a user message. The research and

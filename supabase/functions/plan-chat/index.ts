@@ -41,18 +41,18 @@ async function verifyUser(req: Request) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Groq fallback chain — same shape as assistant-chat. The 70b
-// is the smartest llama on the free tier but has a 100k TPD
-// quota; llama-3.1-8b-instant is ~5x more generous and is good
-// enough for follow-up chat replies. On a 429 we transparently
-// escalate to 8b-instant so the user's follow-up question keeps
-// getting answered instead of returning a 500 "Sorry, I couldn't
-// process that". Non-429 errors still surface immediately (they
-// are usually auth or genuine outages — retrying won't help).
+// Ollama Cloud fallback chain — same shape as assistant-chat. The
+// primary is the smartest model on the free tier but has a lower
+// TPD quota; the fallback is more generous and is good enough for
+// follow-up chat replies. On a 429 we transparently escalate to the
+// fallback so the user's follow-up question keeps getting answered
+// instead of returning a 500 "Sorry, I couldn't process that".
+// Non-429 errors still surface immediately (they are usually auth
+// or genuine outages — retrying won't help).
 // ─────────────────────────────────────────────────────────────
-const GROQ_MODEL_PRIMARY = 'llama-3.3-70b-versatile';
-const GROQ_MODEL_FALLBACK = 'llama-3.1-8b-instant';
-const MODEL_CHAIN = [GROQ_MODEL_PRIMARY, GROQ_MODEL_FALLBACK] as const;
+const OLLAMA_MODEL_PRIMARY = 'deepseek-v4-flash:cloud';
+const OLLAMA_MODEL_FALLBACK = 'nemotron-3-super:cloud';
+const MODEL_CHAIN = [OLLAMA_MODEL_PRIMARY, OLLAMA_MODEL_FALLBACK] as const;
 
 function nextModelAfterQuota(currentModel: string): string | null {
   const idx = MODEL_CHAIN.indexOf(currentModel as (typeof MODEL_CHAIN)[number]);
@@ -61,11 +61,11 @@ function nextModelAfterQuota(currentModel: string): string | null {
 }
 
 function isGroqQuotaError(err: unknown): boolean {
-  return err instanceof Error && /Groq request failed \(429\)/.test(err.message);
+  return err instanceof Error && /Ollama request failed \(429\)/.test(err.message);
 }
 
 async function groqCall(apiKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
-  return await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  return await fetch('https://ollama.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -78,7 +78,7 @@ async function groqCall(apiKey: string, body: Record<string, unknown>, signal?: 
   });
 }
 
-/** Send a pre-built messages array to Groq; escalates to 8b-instant on 429. */
+/** Send a pre-built messages array to Ollama Cloud; escalates to the fallback on 429. */
 async function groqChatMessages(apiKey: string, messages: { role: string; content: string }[], maxTokens = 1200, temperature = 0.5) {
   let lastErr: unknown = null;
   for (const model of MODEL_CHAIN) {
@@ -91,10 +91,10 @@ async function groqChatMessages(apiKey: string, messages: { role: string; conten
       });
       if (!res.ok) {
         const text = await res.text();
-        const err = new Error(`Groq request failed (${res.status}): ${text.slice(0, 300)}`);
+        const err = new Error(`Ollama request failed (${res.status}): ${text.slice(0, 300)}`);
         if (res.status === 429 && nextModelAfterQuota(model)) {
           console.warn(
-            `[plan-chat] groq ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
+            `[plan-chat] ollama ${model} hit quota (429); escalating to ${nextModelAfterQuota(model)}`
           );
           continue;
         }
@@ -102,7 +102,7 @@ async function groqChatMessages(apiKey: string, messages: { role: string; conten
       }
       const data = await res.json();
       const reply = data?.choices?.[0]?.message?.content;
-      if (!reply) throw new Error('Groq returned an empty response');
+      if (!reply) throw new Error('Ollama returned an empty response');
       return reply.trim();
     } catch (err) {
       lastErr = err;
@@ -112,7 +112,7 @@ async function groqChatMessages(apiKey: string, messages: { role: string; conten
   }
   throw lastErr instanceof Error
     ? lastErr
-    : new Error('Groq request failed: all models exhausted quota');
+    : new Error('Ollama request failed: all models exhausted quota');
 }
 
 const SYSTEM_PROMPT =
@@ -145,9 +145,9 @@ Deno.serve(async (req: Request) => {
       return json({ error: 'message is required' }, 400);
     }
 
-    const apiKey = Deno.env.get('GROQ_API_KEY');
+    const apiKey = Deno.env.get('OLLAMA_API_KEY');
     if (!apiKey) {
-      return json({ error: 'GROQ_API_KEY is not configured' }, 500);
+      return json({ error: 'OLLAMA_API_KEY is not configured' }, 500);
     }
 
     const planContext = JSON.stringify(body?.plan_context ?? {}).slice(0, 8000);
