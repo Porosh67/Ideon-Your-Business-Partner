@@ -42,15 +42,15 @@ async function verifyUser(req: Request) {
 // ─────────────────────────────────────────────────────────────
 // Ollama Cloud fallback chain — same shape as assistant-chat. The
 // primary is the smartest model on the free tier but has a lower
-// tokens-per-day quota; nemotron-3-super:cloud is more generous and
+// tokens-per-day quota; nemotron-3-nano:30b-cloud is more generous and
 // is good enough for a YES/NO classifier. On a 429 we transparently
 // escalate to the fallback so the user's "Validate Idea" button
 // keeps working instead of returning a 500. Non-429 errors still
 // surface immediately (they are usually malformed-key or genuine
 // outages — retrying the same call won't help).
 // ─────────────────────────────────────────────────────────────
-const OLLAMA_MODEL_PRIMARY = 'deepseek-v4-flash:cloud';
-const OLLAMA_MODEL_FALLBACK = 'nemotron-3-super:cloud';
+const OLLAMA_MODEL_PRIMARY = 'gemma4:31b-cloud';
+const OLLAMA_MODEL_FALLBACK = 'nemotron-3-nano:30b-cloud';
 const MODEL_CHAIN = [OLLAMA_MODEL_PRIMARY, OLLAMA_MODEL_FALLBACK] as const;
 
 function nextModelAfterQuota(currentModel: string): string | null {

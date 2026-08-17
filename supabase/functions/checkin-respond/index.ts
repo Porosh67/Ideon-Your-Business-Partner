@@ -48,8 +48,8 @@ async function verifyUser(req: Request) {
 // instead of returning a 500. Non-429 errors still surface
 // immediately (they are usually auth/wiring — retrying won't help).
 // ─────────────────────────────────────────────────────────────
-const OLLAMA_MODEL_PRIMARY = 'deepseek-v4-flash:cloud';
-const OLLAMA_MODEL_FALLBACK = 'nemotron-3-super:cloud';
+const OLLAMA_MODEL_PRIMARY = 'gemma4:31b-cloud';
+const OLLAMA_MODEL_FALLBACK = 'nemotron-3-nano:30b-cloud';
 const MODEL_CHAIN = [OLLAMA_MODEL_PRIMARY, OLLAMA_MODEL_FALLBACK] as const;
 
 function nextModelAfterQuota(currentModel: string): string | null {

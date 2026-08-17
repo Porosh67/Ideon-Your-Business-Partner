@@ -90,12 +90,12 @@ Deno.serve(async (req: Request) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'deepseek-v4-flash:cloud',
+        model: 'gemma4:31b-cloud',
         temperature: 0.6,
         max_tokens: 1500,
         messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
       }),
-      // 25s ceiling — covers the deepseek-v4-flash full 1500-token reply; without
+      // 25s ceiling — covers the gemma4:31b-cloud full 1500-token reply; without
       // an explicit timeout a stalled TCP read surfaces `Deno.errors.ReadTimeout`.
       signal: AbortSignal.timeout(25_000),
     });

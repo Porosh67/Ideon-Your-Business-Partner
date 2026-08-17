@@ -43,7 +43,7 @@ function getToken(req: Request): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Ollama Cloud helpers (deepseek-v4-flash:cloud preferred, nemotron-3-super:cloud
+// Ollama Cloud helpers (gemma4:31b-cloud preferred, nemotron-3-nano:30b-cloud
 // fallback on 429). The primary is the smartest model but has a lower TPD (tokens-
 // per-day) quota on the free tier — the fallback is more generous and is good
 // enough for ordinary chat replies. When the primary's daily quota is exhausted
@@ -52,8 +52,8 @@ function getToken(req: Request): string {
 // answering. Non-429 errors still surface immediately (they are usually
 // malformed-key or genuine outages, not quota).
 // ─────────────────────────────────────────────────────────────
-const OLLAMA_MODEL_PRIMARY = 'deepseek-v4-flash:cloud';
-const OLLAMA_MODEL_FALLBACK = 'nemotron-3-super:cloud';
+const OLLAMA_MODEL_PRIMARY = 'gemma4:31b-cloud';
+const OLLAMA_MODEL_FALLBACK = 'nemotron-3-nano:30b-cloud';
 const MODEL_CHAIN = [OLLAMA_MODEL_PRIMARY, OLLAMA_MODEL_FALLBACK] as const;
 
 /**
